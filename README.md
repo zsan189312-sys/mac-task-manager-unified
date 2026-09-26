@@ -10,7 +10,13 @@
 
 SHA256：`82f4785e8ca91066386cc645539deecdd6bc9b149e78c8ff55dc38c6030fd96a`
 
-![性能页](docs/screenshots/performance.png)
+## 预览
+
+| 本机 Mac（性能页） | 远程 N100（性能页） |
+|---|---|
+| ![本机性能页](docs/screenshots/performance.png) | ![N100 性能页](docs/screenshots/n100.png) |
+
+左：P/E 核分离十核图块、内存、磁盘、网络、GPU、电池。右：4 核真实频率、RAPL 实时功耗与温度。
 
 ## 特性
 
@@ -32,8 +38,6 @@ SHA256：`82f4785e8ca91066386cc645539deecdd6bc9b149e78c8ff55dc38c6030fd96a`
 ![容器页](docs/screenshots/docker.png)
 
 **省流量设计**：快照 gzip 后约 1.8 KB/次；进程表与容器数据仅在对应页打开时采集；状态栏实时显示延迟与本次会话流量。5 秒轮询挂机 24 小时约 30 MB。
-
-![N100 性能页](docs/screenshots/n100.png)
 
 ## 构建
 
