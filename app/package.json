@@ -1,0 +1,13 @@
+{
+  "name": "mac-task-manager-unified",
+  "productName": "任务管理器-统一版",
+  "version": "1.0.0",
+  "description": "一个 App 同时监控本机 Mac 与远程 Linux 主机（N100）：CPU/内存/磁盘/网络/GPU/电池/RAPL 功耗温度/进程/Docker",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "electron": "^37.10.3"
+  }
+}
