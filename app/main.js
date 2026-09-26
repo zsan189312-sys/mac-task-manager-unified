@@ -57,6 +57,7 @@ let staticInfo = null;      // 本机静态信息
 let lastCoreTicks = null;   // 每核 [user, system, idle, nice]
 let lastHostFrac = null;    // 机器级 { user, sys }（0-1）
 let lastIfaces = null;
+let lastNetTime = 0;
 let lastProcRaw = null;
 let lastProcsTime = 0;
 let lastProcCpu = null;
@@ -184,26 +185,30 @@ async function localVolumes() {
 
 async function localNet() {
   const out = await run('netstat -ib');
+  const t0 = Date.now();
   const now = {};
   out.trim().split('\n').slice(1).forEach(line => {
     const cols = line.trim().split(/\s+/);
     if (cols.length < 10) return;
     const name = cols[0];
     if (!/^en\d+$/.test(name)) return;
-    if (!now[name]) now[name] = { ibytes: 0, obytes: 0 };
-    now[name].ibytes += parseInt(cols[6], 10) || 0;
-    now[name].obytes += parseInt(cols[7], 10) || 0;
+    // 同一接口会有多行（Link / IPv4 / IPv6），字节数是同一份计数器，只取第一行，否则会重复累加数倍
+    if (now[name]) return;
+    // 列：Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
+    now[name] = { ibytes: parseInt(cols[6], 10) || 0, obytes: parseInt(cols[9], 10) || 0 };
   });
+  const dt = lastNetTime ? Math.max(0.5, (t0 - lastNetTime) / 1000) : 0;
   const ifaces = [];
   for (const [name, cur] of Object.entries(now)) {
     let rxRate = 0, txRate = 0;
-    if (lastIfaces && lastIfaces[name]) {
-      rxRate = Math.max(0, cur.ibytes - lastIfaces[name].ibytes) / 2;
-      txRate = Math.max(0, cur.obytes - lastIfaces[name].obytes) / 2;
+    if (lastIfaces && lastIfaces[name] && dt > 0) {
+      rxRate = Math.max(0, cur.ibytes - lastIfaces[name].ibytes) / dt;
+      txRate = Math.max(0, cur.obytes - lastIfaces[name].obytes) / dt;
     }
     ifaces.push({ name, rx: rxRate, tx: txRate, rxTotal: cur.ibytes, txTotal: cur.obytes });
   }
   lastIfaces = now;
+  lastNetTime = t0;
   ifaces.sort((a, b) => (b.rx + b.tx) - (a.rx + a.tx));
   return ifaces;
 }
@@ -256,13 +261,14 @@ function startNetStream() {
       while ((idx = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, idx);
         buf = buf.slice(idx + 1);
-        const t = line.trim().split(/\s+/);
-        if (t.length < 4 || !t[1] || !t[1].includes('.')) continue;
-        const pid = t[1].slice(t[1].lastIndexOf('.') + 1);
-        if (!/^\d+$/.test(pid)) continue;
+        // 行格式：时间  进程名.pid  bytes_in  bytes_out …
+        // 进程名可能含空格（如 "Google Chrome Helper.1234"），故用正则从行中提取，而不是按空格切第 2 列
+        const m = line.match(/^\S+\s+(.+)\.(\d+)\s+(\d+)\s+(\d+)/);
+        if (!m) continue;
+        const pid = m[2];
         if (!liveNet[pid]) liveNet[pid] = { rx: 0, tx: 0 };
-        liveNet[pid].rx = parseInt(t[2], 10) || 0;
-        liveNet[pid].tx = parseInt(t[3], 10) || 0;
+        liveNet[pid].rx = parseInt(m[3], 10) || 0;
+        liveNet[pid].tx = parseInt(m[4], 10) || 0;
       }
     });
     child.on('exit', () => { setTimeout(startNetStream, 5000); });
@@ -445,7 +451,9 @@ function getJSON(p) {
       res.on('end', () => {
         let buf = Buffer.concat(chunks);
         try { if (res.headers['content-encoding'] === 'gzip') buf = zlib.gunzipSync(buf); } catch (e) { }
-        rBytes += raw;
+        // 会话流量尽量贴近网卡真实字节：响应体（压缩后）+ 响应头 + 请求头/TCP/IP 头估算（约 240B）
+        const hdrBytes = (res.rawHeaders || []).reduce((a, h) => a + Buffer.byteLength(String(h)) + 2, 0);
+        rBytes += raw + hdrBytes + 240;
         try { resolve({ ok: true, data: JSON.parse(buf.toString('utf8')), ms: Date.now() - t0 }); }
         catch (e) { resolve({ ok: false, ms: Date.now() - t0 }); }
       });
@@ -609,6 +617,8 @@ ipcMain.handle('set-host', (e, id) => {
   // 切换主机：重置远程缓存与流量计数，立即采一次
   rSnap = null; rProcs = { list: [], count: 0 }; rDocker = { containers: [] };
   rBytes = 0; rRtt = 0; rOk = false; rFail = 0; rLastProcFetch = 0; rLastDockerFetch = 0;
+  // 同时重置本机侧差分基准：离开本机期间旧快照已过期，否则切回来首帧速率/进程 CPU 会失真
+  lastIfaces = null; lastNetTime = 0; lastProcRaw = null; lastProcsTime = 0; lastCoreTicks = null;
   schedule();
   poll();
   return true;
@@ -627,22 +637,44 @@ ipcMain.handle('add-host', (e, h) => {
 });
 ipcMain.handle('remove-host', (e, id) => {
   if (id === 'local') return false;
+  const wasActive = currentHost.id === id;
   cfg.hosts = cfg.hosts.filter(h => h.id !== id);
-  if (currentHost.id === id) currentHost = cfg.hosts[0];
-  cfg.activeHost = currentHost.id; saveCfg(cfg);
+  if (wasActive) {
+    currentHost = cfg.hosts[0];
+    cfg.activeHost = currentHost.id;
+    // 与 set-host 一致：清缓存 + 重排定时器，否则切回本机后仍按远程档位（如 10 秒）刷新
+    rSnap = null; rProcs = { list: [], count: 0 }; rDocker = { containers: [] };
+    rBytes = 0; rRtt = 0; rOk = false; rFail = 0; rLastProcFetch = 0; rLastDockerFetch = 0;
+    lastIfaces = null; lastNetTime = 0; lastProcRaw = null; lastProcsTime = 0; lastCoreTicks = null;
+    saveCfg(cfg);
+    schedule();
+    poll();
+    return true;
+  }
+  saveCfg(cfg);
   return true;
 });
 ipcMain.handle('kill-process', async (e, pid) => {
-  if (currentHost.kind === 'local') {
-    const r = await dialog.showMessageBox(win, {
-      type: 'warning', buttons: ['强制退出', '取消'], defaultId: 0, cancelId: 1,
-      message: `确定要强制退出进程 ${pid} 吗？`, detail: '未保存的数据可能会丢失。'
-    });
-    if (r.response !== 0) return '已取消';
+  const isLocal = currentHost.kind === 'local';
+  const where = isLocal ? '本机 Mac' : `${currentHost.name}（${currentHost.host}）`;
+  // 远程也必须确认：远程结束进程之前没有任何提示，容易误杀生产容器里的进程
+  const r = await dialog.showMessageBox(win, {
+    type: 'warning', buttons: ['结束进程', '取消'], defaultId: 0, cancelId: 1,
+    message: `确定要结束 ${where} 上的进程 ${pid} 吗？`,
+    detail: isLocal ? '将发送 SIGKILL，未保存的数据可能会丢失。' : '将向远程 agent 发送 SIGTERM，未保存的数据可能会丢失。'
+  });
+  if (r.response !== 0) return '已取消';
+  if (isLocal) {
     return new Promise((resolve) => {
-      exec(`kill -9 ${pid}`, (err) => resolve(err ? '失败：' + err.message : `已退出进程 ${pid}`));
+      exec(`kill -9 ${pid}`, (err) => resolve(err ? '失败：' + err.message : `已结束进程 ${pid}`));
     });
   }
-  const r = await postJSON('/api/kill', { pid, sig: 'TERM' });
-  return r.ok ? '已结束进程 ' + pid : '远程结束失败';
+  const res = await postJSON('/api/kill', { pid, sig: 'TERM' });
+  try {
+    const j = JSON.parse(res.body || '{}');
+    if (j.ok) return `已结束远程进程 ${pid}`;
+    return '远程结束失败：' + (j.error || '未知错误');
+  } catch (err) {
+    return res.ok ? `已结束远程进程 ${pid}` : '远程结束失败';
+  }
 });

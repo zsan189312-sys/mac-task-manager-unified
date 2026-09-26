@@ -197,8 +197,8 @@ function updateSidebar(d) {
   drawSeries(document.getElementById('spark-cpu'), hist.cpu, '#0a84ff');
   drawSeries(document.getElementById('spark-mem'), hist.mem, '#bf5af2', 100);
   drawSeries(document.getElementById('spark-disk'), hist.disk, '#30d158');
-  drawSeries(document.getElementById('spark-net'), hist.netrx, '#ffd60a');
-  drawSeries(document.getElementById('spark-net'), hist.nettx, '#ff453a');
+  // 接收与发送必须叠加绘制：drawSeries 会先 clearRect，连续调两次只会剩下发送曲线
+  drawOverlaid(document.getElementById('spark-net'), hist.netrx, hist.nettx, '#ffd60a', '#ff453a');
   if (d.gpu) drawSeries(document.getElementById('spark-gpu'), hist.gpu, '#64d2ff', 100);
   if (d.batt) drawSeries(document.getElementById('spark-batt'), hist.batt, '#ff9f0a', 100);
   if (d.power) drawSeries(document.getElementById('spark-power'), hist.power, '#ff9f0a');
@@ -604,7 +604,7 @@ function renderDocker(d) {
   if (!tbody) return;
   const list = (d.docker && d.docker.containers) || [];
   if (!list.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-hint">正在采集容器数据…（打开本页后约 10 秒出现，需目标机运行 Docker）</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-hint">正在采集容器数据…（打开本页后约 15 秒出现，需目标机运行 Docker）</td></tr>';
     return;
   }
   tbody.innerHTML = list.map(c => `
