@@ -2,6 +2,14 @@
 
 一个 macOS App，同时监控**本机 Mac** 与**远程 Linux 主机**（N100 等）——整合自 [mac-task-manager](https://github.com/zsan189312-sys/mac-task-manager)（本机版）与 [mac-task-manager-n100](https://github.com/zsan189312-sys/mac-task-manager-n100)（远程版），两个原项目保持独立可用。
 
+## 下载（免编译）
+
+👉 [Releases 页 → v1.0.1](https://github.com/zsan189312-sys/mac-task-manager-unified/releases/tag/v1.0.1)
+
+下载 `TaskManager-Unified-v1.0.1-macOS-arm64.zip`（103 MB，Apple Silicon / M 系列），解压后把「任务管理器-统一版.app」拖进「应用程序」，**首次打开需右键 → 打开**（未做 Apple 公证，右键打开一次后即可正常双击）。
+
+SHA256：`82f4785e8ca91066386cc645539deecdd6bc9b149e78c8ff55dc38c6030fd96a`
+
 ![性能页](docs/screenshots/performance.png)
 
 ## 特性
