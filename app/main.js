@@ -12,6 +12,16 @@ const path = require('path');
 app.setName('任务管理器-统一版');
 nativeTheme.themeSource = 'dark'; // 锁定深色：浅色模式下毛玻璃会让文字不可读
 
+// 单实例锁：防止两个实例同时读写 config.json 互相覆盖（第二个实例直接退出并聚焦第一个）
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    const w = BrowserWindow.getAllWindows()[0];
+    if (w) { if (w.isMinimized()) w.restore(); w.show(); w.focus(); }
+  });
+}
+
 // ---------------------------------------------------------------- 配置
 const DEFAULT_CFG = {
   hosts: [

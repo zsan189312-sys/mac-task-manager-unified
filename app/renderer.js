@@ -143,8 +143,9 @@ document.getElementById('hf-ok').onclick = async () => {
 
 // ---------- 侧栏 ----------
 function cardsFor(d) {
-  const ids = ['cpu', 'mem', 'disk', 'net'];
-  if (d && d.gpu) ids.push('gpu');
+  const ids = ['cpu'];
+  if (d && d.gpu) ids.push('gpu');   // GPU 紧跟 CPU（本机模式）
+  ids.push('mem', 'disk', 'net');
   if (d && d.batt) ids.push('batt');
   if (d && d.power) ids.push('power');
   return ids;
