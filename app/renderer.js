@@ -144,7 +144,7 @@ document.getElementById('hf-ok').onclick = async () => {
 // ---------- 侧栏 ----------
 function cardsFor(d) {
   const ids = ['cpu'];
-  if (d && d.gpu) ids.push('gpu');   // GPU 紧跟 CPU（本机模式）
+  if (d && d.gpu) ids.push('gpu');   // GPU 紧跟 CPU（本机核显 / 远程 N100 核显）
   ids.push('mem', 'disk', 'net');
   if (d && d.batt) ids.push('batt');
   if (d && d.power) ids.push('power');
@@ -191,7 +191,13 @@ function updateSidebar(d) {
   setText('sub-disk', fmtRate(d.disk.totalR + d.disk.totalW));
   const m = mainIface(d);
   setText('sub-net', m ? `${m.name} ↓${fmtRate(m.rx)}` : '无接口');
-  if (d.gpu) setText('sub-gpu', d.gpu.util !== null && d.gpu.util !== undefined ? `${d.gpu.util.toFixed(0)}% · ${fmtSize(d.gpu.memBytes)}` : '—');
+  if (d.gpu) {
+    const g = d.gpu;
+    const u = (g.util === null || g.util === undefined) ? '—' : g.util.toFixed(0) + '%';
+    setText('sub-gpu', g.style === 'linux'
+      ? `${u} · ${g.freq > 0 ? g.freq + ' MHz' : '空闲'}`
+      : `${u} · ${fmtSize(g.memBytes)}`);
+  }
   if (d.batt) setText('sub-batt', `${d.batt.percent}%${d.batt.status === 'charging' ? ' · 充电中' : d.batt.status === 'discharging' ? ' · 放电中' : ''}`);
   if (d.power) setText('sub-power', d.power.ok ? `${d.power.pkg.toFixed(1)} W · ${pkgTemp(d)}℃` : `${pkgTemp(d)}℃ · 功耗不可用`);
 
@@ -410,6 +416,19 @@ const detailDefs = {
   },
   gpu: {
     build(d) {
+      // 远程 Linux 核显（Intel i915/xe）：利用率来自 RC6 空闲驻留差分，频率走 rps_* 节点
+      if (d.gpu && d.gpu.style === 'linux') {
+        return `
+        <div class="info-grid">
+          <div class="info-item"><div class="info-label">GPU 利用率</div><div class="info-value" style="color:var(--cyan)" id="gpu-util">—</div></div>
+          <div class="info-item"><div class="info-label">当前频率</div><div class="info-value" id="gpu-freq">—</div></div>
+          <div class="info-item"><div class="info-label">最大频率</div><div class="info-value" id="gpu-freqmax">—</div></div>
+          <div class="info-item"><div class="info-label">核显型号</div><div class="info-value" style="font-size:12.5px" id="gpu-name">—</div></div>
+          <div class="info-item"><div class="info-label">驱动</div><div class="info-value" id="gpu-driver">—</div></div>
+          <div class="info-item"><div class="info-label">显存</div><div class="info-value" style="font-size:12.5px" id="gpu-mem">—</div></div>
+        </div>
+        <div class="section-title">数据源：/sys/class/drm/card0/gt/gt0（RC6 空闲驻留差分 → 真实利用率，免 sudo）</div>`;
+      }
       return `
         <div class="info-grid">
           <div class="info-item"><div class="info-label">GPU 利用率</div><div class="info-value" style="color:var(--cyan)" id="gpu-util">—</div></div>
@@ -424,6 +443,16 @@ const detailDefs = {
     update(d) {
       const g = d.gpu || {};
       const p = (v) => (v === null || v === undefined) ? '—' : v.toFixed(1) + '%';
+      if (g.style === 'linux') {
+        setText('gpu-util', p(g.util));
+        setText('gpu-freq', g.freq > 0 ? g.freq + ' MHz'
+          : (typeof g.util === 'number' && g.util < 5 ? '空闲' : '—'));
+        setText('gpu-freqmax', g.freqMax ? g.freqMax + ' MHz' + (g.freqMin ? `（${g.freqMin}–${g.freqMax}）` : '') : '—');
+        setText('gpu-name', g.name || '—');
+        setText('gpu-driver', g.driver || '—');
+        setText('gpu-mem', g.shared ? '共享系统内存（核显无独立显存）' : '—');
+        return;
+      }
       setText('gpu-util', p(g.util));
       setText('gpu-ren', p(g.renderer));
       setText('gpu-til', p(g.tiler));
@@ -431,7 +460,14 @@ const detailDefs = {
       setText('gpu-cores', g.cores ? g.cores + ' 核' : '—');
       setText('gpu-metal', g.metal || '—');
     },
-    meta(d) { return (d.gpu && d.gpu.util !== null && d.gpu.util !== undefined) ? `GPU 利用率 ${d.gpu.util.toFixed(0)}%` : 'GPU 数据不可用'; }
+    meta(d) {
+      if (d.gpu && d.gpu.style === 'linux') {
+        const g = d.gpu;
+        if (typeof g.util !== 'number') return 'GPU 数据采样中';
+        return `GPU 利用率 ${g.util.toFixed(0)}%${g.freq > 0 ? ' · ' + g.freq + ' MHz' : ' · 空闲'}${g.name ? ' · ' + g.name : ''}`;
+      }
+      return (d.gpu && d.gpu.util !== null && d.gpu.util !== undefined) ? `GPU 利用率 ${d.gpu.util.toFixed(0)}%` : 'GPU 数据不可用';
+    }
   },
   batt: {
     build() {
@@ -705,7 +741,8 @@ window.bridge.onStats((d) => {
   push(hist.netrx, m ? m.rx : 0);
   push(hist.nettx, m ? m.tx : 0);
   if (d.power) { push(hist.power, d.power.pkg); const tp = parseFloat(pkgTemp(d)); push(hist.temp, isNaN(tp) ? 0 : tp); }
-  if (d.gpu) push(hist.gpu, d.gpu.util || 0);
+  // GPU 首帧采样未就绪（util=null）时沿用上一值，避免曲线上出现假 0 尖谷
+  if (d.gpu) push(hist.gpu, typeof d.gpu.util === 'number' ? d.gpu.util : (hist.gpu.length ? hist.gpu[hist.gpu.length - 1] : 0));
   if (d.batt) push(hist.batt, d.batt.percent || 0);
   d.cpu.cores.forEach((v, i) => {
     if (!hist.cores[i]) hist.cores[i] = [];

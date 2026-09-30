@@ -514,6 +514,19 @@ async function pollRemote() {
   }
 }
 
+function buildRemoteGpu(s) {
+  const g = s && s.gpu;
+  if (!g) return null;                       // 目标机无核显 / 无 gt 节点 → 不显示 GPU 卡片
+  const st = (s.sys && s.sys.gpu) || {};
+  return {
+    style: 'linux',
+    util: (typeof g.busy === 'number') ? g.busy : null,
+    freq: g.freq || 0, freqMax: g.freqMax || 0, freqMin: g.freqMin || 0,
+    name: g.name || st.name || '', driver: g.driver || st.driver || '',
+    shared: true, memBytes: null, cores: null
+  };
+}
+
 function buildRemotePayload() {
   const s = rSnap || {};
   const m = s.mem || {};
@@ -542,7 +555,7 @@ function buildRemotePayload() {
     },
     disk: { devices: s.disk || [], totalR: s.disk_total_r || 0, totalW: s.disk_total_w || 0, volumes: (s.sys && s.sys.disks) || [] },
     net: { ifaces: (s.net || []).map(i => ({ name: i.name, rx: i.rx, tx: i.tx, rxTotal: i.rxTotal, txTotal: i.txTotal })) },
-    gpu: null, batt: null,
+    gpu: buildRemoteGpu(s), batt: null,
     power: { pkg: pkgW, cores: s.power_cores || 0, ok: !!s.power_ok, temp: s.temp || {} },
     sys: s.sys || {},
     procs: {
