@@ -229,6 +229,13 @@ async function localBattery() {
   const voltage = num('Voltage'), amperage = num('InstantAmperage');
   const external = bool('ExternalConnected'), isCharging = bool('IsCharging');
   const nom = num('NominalChargeCapacity'), des = num('DesignCapacity');
+  // 健康度：优先取 macOS 官方评估（BatteryData.MaxCapacity，百分比），与系统设置「最大容量」口径一致；
+  // 读不到时回退 标称满充容量/设计容量 的原始比值（更敏感，会略低于官方值）
+  const bd = io.match(/"BatteryData"\s*=\s*\{[^}]*\}/);
+  const bdMax = bd ? (bd[0].match(/"MaxCapacity"\s*=\s*(\d+)/) || [])[1] : null;
+  const bdPct = bdMax ? parseInt(bdMax, 10) : 0;
+  const health = (bdPct > 0 && bdPct <= 100) ? bdPct
+    : (nom && des ? Math.round(nom / des * 1000) / 10 : null);
   return {
     percent: pct ? parseInt(pct, 10) : null,
     present: !!pct, external, charging: isCharging,
@@ -237,7 +244,7 @@ async function localBattery() {
     voltage: voltage ? voltage / 1000 : null,
     amperage, watts: voltage && amperage ? (voltage * amperage) / 1e6 : null,
     cycle: num('CycleCount'),
-    health: nom && des ? Math.round(nom / des * 1000) / 10 : null
+    health
   };
 }
 
