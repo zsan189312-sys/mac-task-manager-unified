@@ -429,17 +429,25 @@ const detailDefs = {
     meta(d) { return `${fmtSize(d.mem.total)} 物理内存 · Swap ${fmtSize(d.mem.swapTotal)}`; }
   },
   disk: {
-    build() {
-      return `
-        <div class="info-grid">
+    build(d) {
+      const combined = d && (d.disk.devices || []).some(x => x.combined);
+      const cards = combined ? `
+          <div class="info-item"><div class="info-label">合计吞吐（读+写）</div><div class="info-value" style="color:var(--cyan)" id="disk-total">—</div></div>
+          <div class="info-item"><div class="info-label">IOPS</div><div class="info-value" style="color:var(--amber)" id="disk-tps">—</div></div>
+          <div class="info-item"><div class="info-label">平均 IO 大小</div><div class="info-value" id="disk-kbt">—</div></div>
+          <div class="info-item"><div class="info-label" id="disk-peak-label">窗口峰值</div><div class="info-value" id="disk-peak">—</div></div>` : `
           <div class="info-item"><div class="info-label">读取速率</div><div class="info-value" style="color:var(--cyan)" id="disk-r">—</div></div>
           <div class="info-item"><div class="info-label">写入速率</div><div class="info-value" style="color:var(--amber)" id="disk-w">—</div></div>
           <div class="info-item"><div class="info-label">合计吞吐</div><div class="info-value" id="disk-total">—</div></div>
-          <div class="info-item"><div class="info-label" id="disk-peak-label">窗口峰值</div><div class="info-value" id="disk-peak">—</div></div>
-        </div>
+          <div class="info-item"><div class="info-label" id="disk-peak-label">窗口峰值</div><div class="info-value" id="disk-peak">—</div></div>`;
+      const devHead = combined
+        ? '<tr><th>设备</th><th style="text-align:right">吞吐</th><th style="text-align:right">IOPS</th></tr>'
+        : '<tr><th>设备</th><th style="text-align:right">读取</th><th style="text-align:right">写入</th></tr>';
+      return `
+        <div class="info-grid">${cards}</div>
         <div class="section-title">${''}块设备</div>
         <table class="vol-table">
-          <thead><tr><th>设备</th><th style="text-align:right">读取</th><th style="text-align:right">写入</th></tr></thead>
+          <thead id="dev-thead">${devHead}</thead>
           <tbody id="dev-tbody"></tbody>
         </table>
         <div class="section-title">挂载点容量</div>
@@ -450,16 +458,27 @@ const detailDefs = {
     },
     update(d) {
       const combined = (d.disk.devices || []).some(x => x.combined);
-      setText('disk-r', combined ? '合计口径' : fmtRate(d.disk.totalR));
-      setText('disk-w', combined ? '合计口径' : fmtRate(d.disk.totalW));
-      setText('disk-total', fmtRate(d.disk.totalR + d.disk.totalW));
+      if (combined) {
+        setText('disk-total', fmtRate(d.disk.totalR));
+        setText('disk-tps', d.disk.tps != null ? d.disk.tps.toFixed(0) + ' 次/秒' : '—');
+        setText('disk-kbt', d.disk.kbt != null ? d.disk.kbt.toFixed(1) + ' KB' : '—');
+      } else {
+        setText('disk-r', fmtRate(d.disk.totalR));
+        setText('disk-w', fmtRate(d.disk.totalW));
+        setText('disk-total', fmtRate(d.disk.totalR + d.disk.totalW));
+      }
       setText('disk-peak', fmtRate(Math.max(0, ...hist.disk.filter(isNum)) * 1048576));
       const tb = document.getElementById('dev-tbody');
-      if (tb) tb.innerHTML = (d.disk.devices || []).map(v => `
+      if (tb) tb.innerHTML = (d.disk.devices || []).map(v => combined ? `
         <tr>
-          <td>${esc(v.name)}${v.combined ? ' <span style="color:var(--text-3);font-size:11px">（macOS iostat 不区分读/写）</span>' : ''}</td>
-          <td style="text-align:right;color:var(--cyan)">${v.combined ? '—' : fmtRate(v.r)}</td>
-          <td style="text-align:right;color:var(--amber)">${v.combined ? '—' : fmtRate(v.w)}</td>
+          <td>${esc(v.name)} <span style="color:var(--text-3);font-size:11px">（整机合计）</span></td>
+          <td style="text-align:right;color:var(--cyan)">${fmtRate(v.r)}</td>
+          <td style="text-align:right;color:var(--amber)">${d.disk.tps != null ? d.disk.tps.toFixed(0) : '—'}</td>
+        </tr>` : `
+        <tr>
+          <td>${esc(v.name)}</td>
+          <td style="text-align:right;color:var(--cyan)">${fmtRate(v.r)}</td>
+          <td style="text-align:right;color:var(--amber)">${fmtRate(v.w)}</td>
         </tr>`).join('') || '<tr><td colspan="3" class="empty-hint">无块设备</td></tr>';
       const vt = document.getElementById('vol-tbody');
       if (vt) vt.innerHTML = (d.disk.volumes || []).map(v => `
@@ -473,7 +492,7 @@ const detailDefs = {
     },
     meta(d) {
       return d.host.kind === 'local'
-        ? '磁盘活动（iostat 1 秒窗口，macOS 只提供合计吞吐）'
+        ? '磁盘活动（iostat 1 秒窗口 · 合计口径：macOS 不区分读/写）'
         : '块设备吞吐（/proc/diskstats 1 秒窗口差分）';
     }
   },

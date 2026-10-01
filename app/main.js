@@ -169,12 +169,18 @@ async function localMem() {
 async function localDiskIO() {
   const out = await run('iostat -c 2 -d disk0', 5000);
   const rows = out.trim().split('\n');
-  let mbps = 0;
+  // iostat -d 数据行固定 3 列：KB/t  tps  MB/s（此前误判 >=4 列导致解析恒为 0）
+  // 取最后一行（第 2 个采样 = 最近 1 秒窗口；第 1 行是开机以来平均）
+  let mbps = 0, tps = 0, kbt = 0;
   if (rows.length >= 3) {
     const cols = rows[rows.length - 1].trim().split(/\s+/);
-    if (cols.length >= 4) mbps = parseFloat(cols[cols.length - 1]) || 0;
+    if (cols.length >= 3) {
+      kbt = parseFloat(cols[0]) || 0;
+      tps = parseFloat(cols[1]) || 0;
+      mbps = parseFloat(cols[2]) || 0;
+    }
   }
-  return mbps * MB; // macOS 的 iostat 不区分读/写，故按合计处理
+  return { mbps: mbps * MB, tps, kbt }; // macOS 的 iostat 不区分读/写，故按合计处理
 }
 
 async function localVolumes() {
@@ -400,14 +406,14 @@ async function localProcsFallback(iv, now) {
 
 // 本机轮询缓存
 let lTick = 0;
-let lCPU = null, lMem = null, lDisk = 0, lVolumes = [], lNet = [], lGPU = null, lBatt = { present: false }, lProcs = { count: 0, list: [] };
+let lCPU = null, lMem = null, lDisk = 0, lDiskTps = 0, lDiskKbt = 0, lVolumes = [], lNet = [], lGPU = null, lBatt = { present: false }, lProcs = { count: 0, list: [] };
 
 async function pollLocal() {
   lTick++;
   const [cpu, mem, disk, net, gpu] = await Promise.all([
     localCPU(), localMem(), localDiskIO(), localNet(), localGPU()
   ]);
-  lCPU = cpu; lMem = mem; lDisk = disk; lNet = net; lGPU = gpu;
+  lCPU = cpu; lMem = mem; lDisk = disk.mbps; lDiskTps = disk.tps; lDiskKbt = disk.kbt; lNet = net; lGPU = gpu;
   if (lTick === 1 || lTick % 3 === 1) lBatt = await localBattery();
   // 进程表/卷列表只有本机激活时才需要：后台常驻采样只喂曲线数据，省 CPU
   const active = currentHost.kind === 'local';
@@ -443,7 +449,7 @@ function buildLocalPayload() {
       cached: mem.inactive || 0, buffers: mem.speculative || 0, shmem: 0, anon: mem.active || 0,
       style: 'mac'
     }),
-    disk: { devices: [{ name: 'disk0', r: lDisk, w: 0, combined: true }], totalR: lDisk, totalW: 0, volumes: lVolumes },
+    disk: { devices: [{ name: 'disk0', r: lDisk, w: 0, combined: true }], totalR: lDisk, totalW: 0, tps: lDiskTps, kbt: lDiskKbt, volumes: lVolumes },
     net: { ifaces: lNet },
     gpu: (lGPU && lGPU.util !== null) ? Object.assign({}, lGPU, { cores: (st.gpu && st.gpu.cores) || null, metal: (st.gpu && st.gpu.metal) || null }) : null,
     batt: (lBatt && lBatt.present) ? lBatt : null,
