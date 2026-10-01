@@ -1,6 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('bridge', {
   onStats: (cb) => ipcRenderer.on('stats', (e, data) => cb(data)),
+  // 本机后台常驻采样帧（看远程主机时喂本机曲线缓存，纯本地零流量）
+  onLocalHist: (cb) => ipcRenderer.on('local-hist', (e, data) => cb(data)),
   killProcess: (pid) => ipcRenderer.invoke('kill-process', pid),
   // 告诉主进程当前在看哪个页签（远程主机按需采集，省流量）
   setView: (v) => ipcRenderer.send('set-view', v),

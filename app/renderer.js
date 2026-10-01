@@ -17,7 +17,13 @@ function markGap(h) {
 // 幂等：重复调用同一个目标主机不会重复打断点、更不会把缓存覆盖成空缓冲
 function switchHist(toId) {
   if (!toId || histHostId === toId) return;
-  if (histHostId) { markGap(hist); histCache[histHostId] = hist; }
+  if (histHostId) {
+    // 本机由后台常驻采样持续喂曲线（切走也不停采），不算断档；
+    // 远程主机不看时确实没采样，才打断点避免把空白画成假线
+    const prev = hostList.find(h => h.id === histHostId);
+    if (prev && prev.kind !== 'local') markGap(hist);
+    histCache[histHostId] = hist;
+  }
   hist = histCache[toId] || newHist();
   histCache[toId] = hist;
   histHostId = toId;
@@ -796,6 +802,26 @@ window.addEventListener('keydown', e => {
 window.addEventListener('keyup', e => { if (!e.metaKey) document.body.classList.remove('cmd-down'); });
 
 // ---------- 主循环 ----------
+// 本机后台常驻采样帧：看 N100 时也在喂本机的曲线缓存（纯本地、零流量），
+// 这样切回本机时曲线是连续的，不会出现「看 N100 期间」的断档
+window.bridge.onLocalHist((d) => {
+  if (!d || !d.host || !d.cpu) return;
+  if (!histHostId || histHostId === 'local') return;   // 本机激活时走 onStats 正常路径
+  const h = histCache['local'] || (histCache['local'] = newHist());
+  push(h.cpu, d.cpu.total);
+  push(h.mem, d.mem.percent);
+  push(h.disk, (d.disk.totalR + d.disk.totalW) / 1048576);
+  const m = mainIface(d);
+  push(h.netrx, m ? m.rx : 0);
+  push(h.nettx, m ? m.tx : 0);
+  if (d.gpu) push(h.gpu, typeof d.gpu.util === 'number' ? d.gpu.util : (h.gpu.length ? h.gpu[h.gpu.length - 1] : 0));
+  if (d.batt) push(h.batt, d.batt.percent || 0);
+  d.cpu.cores.forEach((v, i) => {
+    if (!h.cores[i]) h.cores[i] = [];
+    push(h.cores[i], v);
+  });
+});
+
 window.bridge.onStats((d) => {
   const hid = d.host && d.host.id;
   if (!hid) return;

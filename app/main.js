@@ -409,8 +409,11 @@ async function pollLocal() {
   ]);
   lCPU = cpu; lMem = mem; lDisk = disk; lNet = net; lGPU = gpu;
   if (lTick === 1 || lTick % 3 === 1) lBatt = await localBattery();
-  if (lTick === 1 || lTick % 15 === 1) lVolumes = await localVolumes();
-  if (lTick === 1 || lTick % 3 === 0) lProcs = await localProcs();
+  // 进程表/卷列表只有本机激活时才需要：后台常驻采样只喂曲线数据，省 CPU
+  const active = currentHost.kind === 'local';
+  if (active && (lRefreshUI || lTick === 1 || lTick % 15 === 1)) lVolumes = await localVolumes();
+  if (active && (lRefreshUI || lTick === 1 || lTick % 3 === 0)) lProcs = await localProcs();
+  if (lRefreshUI) lRefreshUI = false;
 }
 
 function buildLocalPayload() {
@@ -449,6 +452,12 @@ function buildLocalPayload() {
     procs: lProcs,
     docker: null
   };
+}
+
+// 本机后台采样帧：只含曲线需要的字段（不带进程表，渲染端只写入 hist 缓存）
+function buildLocalHistPayload() {
+  const p = buildLocalPayload();
+  return { host: p.host, ts: p.ts, link: p.link, cpu: p.cpu, mem: p.mem, disk: p.disk, net: p.net, gpu: p.gpu, batt: p.batt };
 }
 
 // ================================================================ 远程采集
@@ -570,11 +579,34 @@ function buildRemotePayload() {
 }
 
 // ================================================================ 轮询调度
+// 本机常驻采样：无论当前在看哪台主机，每 2 秒都采一拍（纯本地、零流量）。
+// 这样切去 N100 一段时间再切回来，本机曲线是连续的，不会出现「看 N100 期间」的断档。
+let localTimer = null;
+let localPolling = false, localPending = false;
+let lRefreshUI = false;    // 切回本机后强制补采一次进程/卷列表（后台期间只喂曲线、省 CPU）
+async function sampleLocal() {
+  if (localPolling) { localPending = true; return; }
+  if (!win || win.isDestroyed()) return;
+  localPolling = true;
+  try {
+    await pollLocal();
+    if (!win || win.isDestroyed()) return;
+    if (currentHost.kind === 'local') win.webContents.send('stats', buildLocalPayload());
+    else win.webContents.send('local-hist', buildLocalHistPayload());   // 后台喂本机曲线缓存
+  } catch (e) { console.error('local poll error', e); }
+  finally {
+    localPolling = false;
+    if (localPending) { localPending = false; sampleLocal(); }
+  }
+}
+
+// 远程轮询：只在远程主机激活时运行（不看就不采，省流量）
 let timer = null;
 let polling = false;
 let pendingPoll = false;   // 采集进行中又被请求（切主机的立即刷新）：等本次结束后补采一次
 async function poll() {
-  // 重入保护：机器高负载时单次采集可能超过轮询间隔（本机 iostat 就有 1 秒窗口），
+  if (currentHost.kind !== 'remote') return;   // 本机由 sampleLocal 常驻驱动，不走这里
+  // 重入保护：机器高负载时单次采集可能超过轮询间隔，
   // 否则定时器会叠加出多路并发采集，既让差分基准互相覆盖又白吃 CPU
   if (polling) { pendingPoll = true; return; }
   if (!win || win.isDestroyed()) return;
@@ -582,11 +614,10 @@ async function poll() {
   polling = true;
   try {
     polls++;
-    if (host.kind === 'local') await pollLocal();
-    else await pollRemote();
+    await pollRemote();
     // 采集期间用户切换了主机：丢弃这份旧主机的数据，避免张冠李戴
     if (host !== currentHost) return;
-    win.webContents.send('stats', host.kind === 'local' ? buildLocalPayload() : buildRemotePayload());
+    win.webContents.send('stats', buildRemotePayload());
   } catch (e) { console.error('poll error', e); }
   finally {
     polling = false;
@@ -598,7 +629,7 @@ async function poll() {
 }
 function schedule() {
   if (timer) { clearInterval(timer); timer = null; }
-  timer = setInterval(poll, currentHost.kind === 'local' ? 2000 : cfg.intervalMs);
+  if (currentHost.kind === 'remote') timer = setInterval(poll, cfg.intervalMs);
 }
 
 // ================================================================ 窗口
@@ -626,7 +657,8 @@ function createWindow() {
     } catch (e) { }
   });
 
-  poll();
+  sampleLocal();                                        // 本机常驻采样，永远在跑
+  if (currentHost.kind === 'remote') poll();            // 远程只在激活时轮询
   schedule();
 }
 
@@ -639,10 +671,15 @@ app.whenReady().then(async () => {
     staticInfo.gpu = { cores: cores ? parseInt(cores, 10) : null, metal: metal ? metal.trim() : null };
   });
   startNetStream();          // nettop 常驻流：每进程网络累计字节
+  localTimer = setInterval(sampleLocal, 2000);   // 本机常驻采样：每 2 秒一拍，与激活主机无关
   createWindow();
 });
 
-app.on('window-all-closed', () => { if (timer) clearInterval(timer); app.quit(); });
+app.on('window-all-closed', () => {
+  if (timer) clearInterval(timer);
+  if (localTimer) clearInterval(localTimer);
+  app.quit();
+});
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
 // ================================================================ IPC
@@ -666,8 +703,9 @@ ipcMain.handle('set-host', (e, id) => {
   // 同时重置本机侧差分基准：离开本机期间旧快照已过期，否则切回来首帧速率/进程 CPU 会失真
   // （lastCoreTicks 例外：它是累计 tick，算的是区间占比与时间无关，保留可让切回后首帧就有真实 CPU 值，否则每核图块会空 2 秒）
   lastIfaces = null; lastNetTime = 0; lastProcRaw = null; lastProcsTime = 0;
+  if (h.kind === 'local') lRefreshUI = true;   // 后台期间进程/卷列表没采，切回先补一拍
   schedule();
-  poll();
+  if (h.kind === 'remote') poll(); else sampleLocal();   // 立即出一帧；本机在途则由 pending 补
   return true;
 });
 ipcMain.handle('add-host', (e, h) => {
@@ -693,9 +731,10 @@ ipcMain.handle('remove-host', (e, id) => {
     rSnap = null; rProcs = { list: [], count: 0 }; rDocker = { containers: [] };
     rBytes = 0; rRtt = 0; rOk = false; rFail = 0; rLastProcFetch = 0; rLastDockerFetch = 0;
     lastIfaces = null; lastNetTime = 0; lastProcRaw = null; lastProcsTime = 0;
+    if (currentHost.kind === 'local') lRefreshUI = true;
     saveCfg(cfg);
     schedule();
-    poll();
+    if (currentHost.kind === 'remote') poll(); else sampleLocal();
     return true;
   }
   saveCfg(cfg);
