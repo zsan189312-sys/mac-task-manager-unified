@@ -8,7 +8,7 @@
 
 下载 `TaskManager-Unified-v1.0.1-macOS-arm64.zip`（103 MB，Apple Silicon / M 系列），解压后把「任务管理器-统一版.app」拖进「应用程序」，**首次打开需右键 → 打开**（未做 Apple 公证，右键打开一次后即可正常双击）。
 
-SHA256：`e7a761a5879ca4fcadc65606785efe439cc59c8179ab916fd0ddf944e346195e`
+SHA256：`f84b9e7be6920e43a249ecdd81eea2e15aed722b53af91e81e6a099192c20cb9`
 
 ## 预览
 
