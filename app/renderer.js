@@ -69,6 +69,7 @@ function esc(s) {
   return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 function setText(id, v) { const el = document.getElementById(id); if (el && el.textContent !== v) el.textContent = v; }
+function setHTML(id, v) { const el = document.getElementById(id); if (el && el.innerHTML !== v) el.innerHTML = v; }  // 仅用于自产字符串，勿传外部数据
 
 function setupCanvas(cv) {
   const dpr = window.devicePixelRatio || 1;
@@ -336,7 +337,7 @@ const detailDefs = {
           </div>`;
       });
       html += `</div>
-        <div class="info-grid">
+        <div class="info-grid cols-3">
           <div class="info-item"><div class="info-label">总利用率</div><div class="info-value" id="cpu-total">—</div></div>
           <div class="info-item"><div class="info-label">用户 / 系统</div><div class="info-value" id="cpu-us">—</div></div>
           <div class="info-item"><div class="info-label">${d.host.kind === 'local' ? '空闲' : 'I/O 等待'}</div><div class="info-value" id="cpu-io">—</div></div>
@@ -365,10 +366,10 @@ const detailDefs = {
           ? (700 + (d.cpu.freqP / 100) * (4410 - 700)) / 1000 : null;
         const fe = d.cpu.freqE !== null && d.cpu.freqE !== undefined
           ? (600 + (d.cpu.freqE / 100) * (2600 - 600)) / 1000 : null;
-        setText('cpu-freq', (fp && fe) ? `P ${fp.toFixed(2)} / E ${fe.toFixed(2)} GHz（估算）` : '—');
+        setHTML('cpu-freq', (fp && fe) ? `P ${fp.toFixed(2)} / E ${fe.toFixed(2)} GHz <small>（估算）</small>` : '—');
       } else {
         const avgF = d.cpu.freq.length ? d.cpu.freq.reduce((a, b) => a + b, 0) / d.cpu.freq.length / 1000 : 0;
-        setText('cpu-freq', avgF ? avgF.toFixed(2) + ' GHz（最大 ' + (d.cpu.freqMax / 1000).toFixed(2) + ' GHz）' : '—');
+        setHTML('cpu-freq', avgF ? avgF.toFixed(2) + ' GHz <small>最大 ' + (d.cpu.freqMax / 1000).toFixed(2) + ' GHz</small>' : '—');
       }
       const la = d.cpu.load || [0, 0, 0];
       setText('cpu-load', `${(la[0] || 0).toFixed(2)} / ${(la[1] || 0).toFixed(2)} / ${(la[2] || 0).toFixed(2)}`);
@@ -513,7 +514,7 @@ const detailDefs = {
       // 远程 Linux 核显（Intel i915/xe）：利用率来自 RC6 空闲驻留差分，频率走 rps_* 节点
       if (d.gpu && d.gpu.style === 'linux') {
         return `
-        <div class="info-grid">
+        <div class="info-grid cols-3">
           <div class="info-item"><div class="info-label">GPU 利用率</div><div class="info-value" style="color:var(--cyan)" id="gpu-util">—</div></div>
           <div class="info-item"><div class="info-label">当前频率</div><div class="info-value" id="gpu-freq">—</div></div>
           <div class="info-item"><div class="info-label">最大频率</div><div class="info-value" id="gpu-freqmax">—</div></div>
@@ -524,7 +525,7 @@ const detailDefs = {
         <div class="section-title">数据源：/sys/class/drm/card0/gt/gt0（RC6 空闲驻留差分 → 真实利用率，免 sudo）</div>`;
       }
       return `
-        <div class="info-grid">
+        <div class="info-grid cols-3">
           <div class="info-item"><div class="info-label">GPU 利用率</div><div class="info-value" style="color:var(--cyan)" id="gpu-util">—</div></div>
           <div class="info-item"><div class="info-label">渲染器利用率</div><div class="info-value" id="gpu-ren">—</div></div>
           <div class="info-item"><div class="info-label">分块器利用率</div><div class="info-value" id="gpu-til">—</div></div>
@@ -603,7 +604,7 @@ const detailDefs = {
   power: {
     build() {
       return `
-        <div class="info-grid">
+        <div class="info-grid cols-3">
           <div class="info-item"><div class="info-label">整机封装功耗</div><div class="info-value" style="color:var(--orange)" id="pw-pkg">—</div></div>
           <div class="info-item"><div class="info-label">CPU 核心功耗</div><div class="info-value" id="pw-cores">—</div></div>
           <div class="info-item"><div class="info-label">CPU 封装温度</div><div class="info-value" id="pw-temp">—</div></div>
