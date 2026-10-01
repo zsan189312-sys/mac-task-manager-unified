@@ -571,14 +571,23 @@ function buildRemotePayload() {
 
 // ================================================================ 轮询调度
 let timer = null;
+let polling = false;
 async function poll() {
+  // 重入保护：机器高负载时单次采集可能超过轮询间隔（本机 iostat 就有 1 秒窗口），
+  // 否则定时器会叠加出多路并发采集，既让差分基准互相覆盖又白吃 CPU
+  if (polling) return;
   if (!win || win.isDestroyed()) return;
+  const host = currentHost;
+  polling = true;
   try {
     polls++;
-    if (currentHost.kind === 'local') await pollLocal();
+    if (host.kind === 'local') await pollLocal();
     else await pollRemote();
-    win.webContents.send('stats', currentHost.kind === 'local' ? buildLocalPayload() : buildRemotePayload());
+    // 采集期间用户切换了主机：丢弃这份旧主机的数据，避免张冠李戴
+    if (host !== currentHost) return;
+    win.webContents.send('stats', host.kind === 'local' ? buildLocalPayload() : buildRemotePayload());
   } catch (e) { console.error('poll error', e); }
+  finally { polling = false; }
 }
 function schedule() {
   if (timer) { clearInterval(timer); timer = null; }
@@ -648,7 +657,8 @@ ipcMain.handle('set-host', (e, id) => {
   rSnap = null; rProcs = { list: [], count: 0 }; rDocker = { containers: [] };
   rBytes = 0; rRtt = 0; rOk = false; rFail = 0; rLastProcFetch = 0; rLastDockerFetch = 0;
   // 同时重置本机侧差分基准：离开本机期间旧快照已过期，否则切回来首帧速率/进程 CPU 会失真
-  lastIfaces = null; lastNetTime = 0; lastProcRaw = null; lastProcsTime = 0; lastCoreTicks = null;
+  // （lastCoreTicks 例外：它是累计 tick，算的是区间占比与时间无关，保留可让切回后首帧就有真实 CPU 值，否则每核图块会空 2 秒）
+  lastIfaces = null; lastNetTime = 0; lastProcRaw = null; lastProcsTime = 0;
   schedule();
   poll();
   return true;
@@ -675,7 +685,7 @@ ipcMain.handle('remove-host', (e, id) => {
     // 与 set-host 一致：清缓存 + 重排定时器，否则切回本机后仍按远程档位（如 10 秒）刷新
     rSnap = null; rProcs = { list: [], count: 0 }; rDocker = { containers: [] };
     rBytes = 0; rRtt = 0; rOk = false; rFail = 0; rLastProcFetch = 0; rLastDockerFetch = 0;
-    lastIfaces = null; lastNetTime = 0; lastProcRaw = null; lastProcsTime = 0; lastCoreTicks = null;
+    lastIfaces = null; lastNetTime = 0; lastProcRaw = null; lastProcsTime = 0;
     saveCfg(cfg);
     schedule();
     poll();
@@ -684,7 +694,10 @@ ipcMain.handle('remove-host', (e, id) => {
   saveCfg(cfg);
   return true;
 });
-ipcMain.handle('kill-process', async (e, pid) => {
+ipcMain.handle('kill-process', async (e, rawPid) => {
+  const pid = parseInt(rawPid, 10);
+  // 白名单校验：只接受正整数 pid，既防误杀（0/负数=进程组/伪行）也防命令注入
+  if (!Number.isInteger(pid) || pid <= 1) return '无效的进程号';
   const isLocal = currentHost.kind === 'local';
   const where = isLocal ? '本机 Mac' : `${currentHost.name}（${currentHost.host}）`;
   // 远程也必须确认：远程结束进程之前没有任何提示，容易误杀生产容器里的进程

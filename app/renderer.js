@@ -1,11 +1,19 @@
 // 任务管理器-统一版 渲染进程：同一套 UI 承载「本机 Mac」与「远程 Linux 主机」
 const HIST = 60;
+let histIntervalMs = 2000;    // 当前主机的采样间隔，用于横轴时间窗标注（窗口 = HIST × 间隔）
+const SERIES_KEYS = ['cpu', 'mem', 'disk', 'netrx', 'nettx', 'power', 'temp', 'gpu', 'batt'];
 function newHist() { return { cpu: [], mem: [], disk: [], netrx: [], nettx: [], power: [], temp: [], gpu: [], batt: [], cores: [] }; }
 let hist = newHist();
 // 按主机保留历史曲线：切换主机时保存当前缓冲、切回时恢复，避免重新采样从零开始
 const histCache = {}; // hostId -> hist
+// 离开某台主机时在其各条曲线上打一个断点（null）：切回后线条在断档处断开，
+// 而不是把「离开期间的空白」压缩成一条连续的假线
+function markGap(h) {
+  SERIES_KEYS.forEach(k => { if (Array.isArray(h[k]) && h[k].length) h[k].push(null); });
+  (h.cores || []).forEach(a => { if (Array.isArray(a) && a.length) a.push(null); });
+}
 function switchHist(toId) {
-  if (currentHostId) histCache[currentHostId] = hist;
+  if (currentHostId) { markGap(hist); histCache[currentHostId] = hist; }
   hist = histCache[toId] || newHist();
   histCache[toId] = hist;
 }
@@ -60,42 +68,65 @@ function setupCanvas(cv) {
   return { ctx, w, h };
 }
 
+// 序列里的 null/NaN 表示「此处无数据」（主机切换留下的空档）：只断开笔画，不连线
+function isNum(v) { return typeof v === 'number' && isFinite(v); }
+function seriesMax(yMax, ...arrs) {
+  let m = isNum(yMax) ? yMax : 0;
+  arrs.forEach(a => (a || []).forEach(v => { if (isNum(v) && v > m) m = v; }));
+  return Math.max(m, 0.0001) * 1.15;
+}
+function strokeSeries(ctx, data, x0, step, h, max, color, fill) {
+  let seg = [];
+  const flush = () => {
+    if (seg.length >= 2) {
+      ctx.beginPath();
+      seg.forEach((p, i) => i === 0 ? ctx.moveTo(p[0], p[1]) : ctx.lineTo(p[0], p[1]));
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.stroke();
+      if (fill) {
+        const g = ctx.createLinearGradient(0, 0, 0, h);
+        g.addColorStop(0, color + '40'); g.addColorStop(1, color + '00');
+        ctx.lineTo(seg[seg.length - 1][0], h); ctx.lineTo(seg[0][0], h); ctx.closePath();
+        ctx.fillStyle = g; ctx.fill();
+      }
+    }
+    seg = [];
+  };
+  data.forEach((v, i) => {
+    if (!isNum(v)) { flush(); return; }
+    seg.push([x0 + i * step, h - 1.5 - (v / max) * (h - 3)]);
+  });
+  flush();
+}
+
 function drawSeries(cv, data, color, yMax) {
   if (!cv) return;
   const { ctx, w, h } = setupCanvas(cv);
   ctx.clearRect(0, 0, w, h);
   if (!data || data.length < 2) return;
-  const max = Math.max(yMax || 0, ...data, 0.0001) * 1.15;
+  const valid = data.filter(isNum);
+  if (valid.length < 2) return;
   const step = w / (HIST - 1);
   const x0 = w - (data.length - 1) * step;
-  ctx.beginPath();
-  data.forEach((v, i) => {
-    const x = x0 + i * step;
-    const y = h - 1.5 - (v / max) * (h - 3);
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  });
-  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.stroke();
-  ctx.lineTo(x0 + (data.length - 1) * step, h); ctx.lineTo(x0, h); ctx.closePath();
-  const g = ctx.createLinearGradient(0, 0, 0, h);
-  g.addColorStop(0, color + '40'); g.addColorStop(1, color + '00');
-  ctx.fillStyle = g; ctx.fill();
+  strokeSeries(ctx, data, x0, step, h, seriesMax(yMax, valid), color, true);
 }
 
 function drawOverlaid(cv, primary, secondary, c1, c2) {
   drawSeries(cv, primary, c1);
-  if (!cv) return;
+  if (!cv || !secondary || secondary.length < 2) return;
   const { ctx, w, h } = setupCanvas(cv);
-  if (!secondary || secondary.length < 2) return;
-  const max = Math.max(...primary, ...secondary, 0.0001) * 1.15;
+  if (secondary.filter(isNum).length < 2) return;
   const step = w / (HIST - 1);
   const x0 = w - (secondary.length - 1) * step;
-  ctx.beginPath();
-  secondary.forEach((v, i) => {
-    const x = x0 + i * step;
-    const y = h - 1.5 - (v / max) * (h - 3);
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  });
-  ctx.strokeStyle = c2; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.stroke();
+  // y 轴量程要含两条线，否则发送曲线会冲出画布
+  strokeSeries(ctx, secondary, x0, step, h, seriesMax(0, primary, secondary), c2, false);
+}
+
+// 横轴时间窗标注：窗口 = HIST × 当前采样间隔（本机 2s → 2 分钟；远程 5s → 5 分钟）
+function updateAxisLabels() {
+  const sec = Math.round(histIntervalMs * HIST / 1000);
+  const txt = sec >= 60 ? (sec / 60).toFixed(sec % 60 === 0 ? 0 : 1) + ' 分钟前' : sec + ' 秒前';
+  setText('chart-x-left', txt);
+  setText('disk-peak-label', sec >= 60 ? (sec / 60).toFixed(sec % 60 === 0 ? 0 : 1) + ' 分钟峰值' : sec + ' 秒峰值');
 }
 
 // ---------- 主机切换 ----------
@@ -129,9 +160,10 @@ async function renderHostSeg() {
 }
 
 function resetForHostSwitch() {
-  latest = null; bodyBuilt = false; builtKey = ''; activeCard = 'cpu';
-  // 历史曲线不再清空：由 onStats 的 hostChanged 分支 switchHist() 按主机缓存/恢复
-  buildSidebarFor(null);
+  latest = null; bodyBuilt = false; builtKey = '';
+  // 保留用户当前查看的卡片（新主机没有该卡片时由 buildSidebarFor/onStats 回落到 CPU）
+  // 历史曲线不清空：由 onStats 的 hostChanged 分支 switchHist() 按主机缓存/恢复
+  buildSidebarFor(null, true);
 }
 
 document.getElementById('hf-cancel').onclick = () => document.getElementById('host-form').classList.remove('on');
@@ -157,11 +189,11 @@ function cardsFor(d) {
   if (d && d.power) ids.push('power');
   return ids;
 }
-function buildSidebarFor(d) {
+function buildSidebarFor(d, keepCard) {
   const sb = document.getElementById('sidebar');
   sb.innerHTML = '';
   const ids = cardsFor(d);
-  if (!ids.includes(activeCard)) activeCard = 'cpu';
+  if (!keepCard && !ids.includes(activeCard)) activeCard = 'cpu';
   ids.forEach(id => {
     const c = CARD_DEFS[id];
     const el = document.createElement('div');
@@ -347,7 +379,7 @@ const detailDefs = {
           <div class="info-item"><div class="info-label">读取速率</div><div class="info-value" style="color:var(--cyan)" id="disk-r">—</div></div>
           <div class="info-item"><div class="info-label">写入速率</div><div class="info-value" style="color:var(--amber)" id="disk-w">—</div></div>
           <div class="info-item"><div class="info-label">合计吞吐</div><div class="info-value" id="disk-total">—</div></div>
-          <div class="info-item"><div class="info-label">60 秒峰值</div><div class="info-value" id="disk-peak">—</div></div>
+          <div class="info-item"><div class="info-label" id="disk-peak-label">窗口峰值</div><div class="info-value" id="disk-peak">—</div></div>
         </div>
         <div class="section-title">${''}块设备</div>
         <table class="vol-table">
@@ -365,7 +397,7 @@ const detailDefs = {
       setText('disk-r', combined ? '合计口径' : fmtRate(d.disk.totalR));
       setText('disk-w', combined ? '合计口径' : fmtRate(d.disk.totalW));
       setText('disk-total', fmtRate(d.disk.totalR + d.disk.totalW));
-      setText('disk-peak', fmtRate(Math.max(...hist.disk, 0) * 1048576));
+      setText('disk-peak', fmtRate(Math.max(0, ...hist.disk.filter(isNum)) * 1048576));
       const tb = document.getElementById('dev-tbody');
       if (tb) tb.innerHTML = (d.disk.devices || []).map(v => `
         <tr>
@@ -524,7 +556,7 @@ const detailDefs = {
           <div class="info-item"><div class="info-label">无线网卡温度</div><div class="info-value" id="pw-wifi">—</div></div>
           <div class="info-item"><div class="info-label">数据源</div><div class="info-value" style="font-size:12.5px">Intel RAPL（真实寄存器）</div></div>
         </div>
-        <div class="section-title">近 60 秒功耗 / 温度（<span style="color:var(--orange)">橙=功耗</span> / <span style="color:var(--red)">红=温度</span>）</div>`;
+        <div class="section-title">窗口内功耗 / 温度（<span style="color:var(--orange)">橙=功耗</span> / <span style="color:var(--red)">红=温度</span>）</div>`;
     },
     update(d) {
       setText('pw-pkg', d.power.ok ? d.power.pkg.toFixed(2) + ' W' : '不可用');
@@ -545,7 +577,9 @@ function tickDetail(force) {
   const body = document.getElementById('detail-body');
   // 首次采样核心数可能为 0，之后核心数组就绪时需重建（否则每核图块永远缺失）
   const key = activeCard + ':' + (activeCard === 'cpu' ? (latest.cpu.cores || []).length : '');
-  if (!bodyBuilt || force || key !== builtKey) {
+  // 切回主机后的首帧核心数组可能还是空的：此时不要用「0 个图块」覆盖已有 DOM（避免闪一下空白）
+  const coresPending = activeCard === 'cpu' && (latest.cpu.cores || []).length === 0 && (latest.cpu.count || 0) > 0;
+  if ((!bodyBuilt || force || key !== builtKey) && (!coresPending || !body.firstElementChild)) {
     try { body.innerHTML = detailDefs[activeCard].build(latest); bodyBuilt = true; builtKey = key; }
     catch (e) { console.error('detail.build', e); return; }
   }
@@ -555,22 +589,17 @@ function tickDetail(force) {
     const big = document.getElementById('bigchart');
     if (activeCard === 'net') {
       drawOverlaid(big, hist.netrx, hist.nettx, '#ffd60a', '#ff453a');
-      setText('chart-max', fmtRate(Math.max(...hist.netrx, ...hist.nettx, 0.001)));
+      setText('chart-max', fmtRate(Math.max(0.001, ...hist.netrx.filter(isNum), ...hist.nettx.filter(isNum))));
     } else if (activeCard === 'power') {
       drawSeries(big, hist.power, '#ff9f0a');
       const { ctx, w, h } = setupCanvas(big);
-      if (hist.temp.length > 1) {
-        const max = Math.max(...hist.temp, 1) * 1.2;
+      const temps = hist.temp.filter(isNum);
+      if (temps.length > 1) {
         const step = w / (HIST - 1);
         const x0 = w - (hist.temp.length - 1) * step;
-        ctx.beginPath();
-        hist.temp.forEach((v, i) => {
-          const x = x0 + i * step, y = h - 1.5 - (v / max) * (h - 3);
-          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-        });
-        ctx.strokeStyle = '#ff453a'; ctx.lineWidth = 1.5; ctx.stroke();
+        strokeSeries(ctx, hist.temp, x0, step, h, Math.max(...temps, 1) * 1.2, '#ff453a', false);
       }
-      setText('chart-max', Math.max(...hist.power, 0).toFixed(1) + ' W');
+      setText('chart-max', Math.max(0, ...hist.power.filter(isNum)).toFixed(1) + ' W');
     } else if (activeCard === 'gpu') {
       drawSeries(big, hist.gpu, '#64d2ff', 100);
       setText('chart-max', '100%');
@@ -582,7 +611,7 @@ function tickDetail(force) {
       const yMax = activeCard === 'mem' ? 100 : undefined;
       drawSeries(big, series[activeCard], CARD_DEFS[activeCard].color, yMax);
       setText('chart-max', activeCard === 'mem' ? '100%'
-        : activeCard === 'disk' ? fmtRate(Math.max(...hist.disk, 0) * 1048576) : '');
+        : activeCard === 'disk' ? fmtRate(Math.max(0, ...hist.disk.filter(isNum)) * 1048576) : '');
     }
   } catch (e) { console.error('detail.chart', e); }
   try { setText('detail-meta', detailDefs[activeCard].meta(latest)); } catch (e) { }
@@ -741,6 +770,8 @@ window.bridge.onStats((d) => {
     document.getElementById('poll-ctl').classList.toggle('disabled', d.host.kind === 'local');
   }
   latest = d;
+  histIntervalMs = (d.link && d.link.interval) || (d.host.kind === 'local' ? 2000 : histIntervalMs);
+  updateAxisLabels();
   push(hist.cpu, d.cpu.total);
   push(hist.mem, d.mem.percent);
   push(hist.disk, (d.disk.totalR + d.disk.totalW) / 1048576);

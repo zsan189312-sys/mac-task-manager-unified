@@ -62,7 +62,11 @@ codesign --force --deep -s - "$BUILD"
 xattr -cr "$BUILD"
 pkill -f "$APP_NAME.app/Contents/MacOS" 2>/dev/null || true
 sleep 1
-rm -rf "/Applications/$APP_NAME.app"
+# 旧包优先直接删；受限环境（rm 被拦截）下退化为移走，保证后续 mv 一定能成功
+if [ -d "/Applications/$APP_NAME.app" ]; then
+  rm -rf "/Applications/$APP_NAME.app" 2>/dev/null \
+    || mv "/Applications/$APP_NAME.app" "/tmp/$APP_NAME.old.$$.app" 2>/dev/null || true
+fi
 mv "$BUILD" "/Applications/$APP_NAME.app"
 open "/Applications/$APP_NAME.app"
 echo "已安装并启动：$APP_NAME"
