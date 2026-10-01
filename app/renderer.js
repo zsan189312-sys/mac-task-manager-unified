@@ -1,6 +1,14 @@
 // 任务管理器-统一版 渲染进程：同一套 UI 承载「本机 Mac」与「远程 Linux 主机」
 const HIST = 60;
-const hist = { cpu: [], mem: [], disk: [], netrx: [], nettx: [], power: [], temp: [], gpu: [], batt: [], cores: [] };
+function newHist() { return { cpu: [], mem: [], disk: [], netrx: [], nettx: [], power: [], temp: [], gpu: [], batt: [], cores: [] }; }
+let hist = newHist();
+// 按主机保留历史曲线：切换主机时保存当前缓冲、切回时恢复，避免重新采样从零开始
+const histCache = {}; // hostId -> hist
+function switchHist(toId) {
+  if (currentHostId) histCache[currentHostId] = hist;
+  hist = histCache[toId] || newHist();
+  histCache[toId] = hist;
+}
 
 const CARD_DEFS = {
   cpu: { title: 'CPU', color: '#0a84ff' },
@@ -103,7 +111,7 @@ async function renderHostSeg() {
       (h.kind === 'remote' ? '<span class="hx" title="移除">×</span>' : '');
     el.onclick = async (ev) => {
       if (ev.target.classList.contains('hx')) {
-        await window.bridge.removeHost(h.id); renderHostSeg(); return;
+        await window.bridge.removeHost(h.id); delete histCache[h.id]; renderHostSeg(); return;
       }
       if (h.id === r.active) return;
       await window.bridge.setHost(h.id);
@@ -122,8 +130,7 @@ async function renderHostSeg() {
 
 function resetForHostSwitch() {
   latest = null; bodyBuilt = false; builtKey = ''; activeCard = 'cpu';
-  Object.keys(hist).forEach(k => { if (Array.isArray(hist[k])) hist[k] = []; });
-  hist.cores = [];
+  // 历史曲线不再清空：由 onStats 的 hostChanged 分支 switchHist() 按主机缓存/恢复
   buildSidebarFor(null);
 }
 
@@ -726,8 +733,8 @@ window.addEventListener('keyup', e => { if (!e.metaKey) document.body.classList.
 window.bridge.onStats((d) => {
   const hostChanged = (d.host && d.host.id) !== currentHostId;
   if (hostChanged) {
+    switchHist(d.host.id);   // 保存旧主机曲线、恢复新主机曲线（切回不丢）
     currentHostId = d.host.id;
-    Object.keys(hist).forEach(k => { if (Array.isArray(hist[k])) hist[k] = []; });
     bodyBuilt = false; builtKey = '';
     if (!cardsFor(d).includes(activeCard)) activeCard = 'cpu';
     buildSidebarFor(d);
