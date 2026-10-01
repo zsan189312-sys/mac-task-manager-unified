@@ -146,7 +146,11 @@ async function localCPU() {
 }
 
 async function localMem() {
-  const [vmStat, swap] = await Promise.all([run('vm_stat'), run('sysctl -n vm.swapusage')]);
+  const [vmStat, swap, pageCounts] = await Promise.all([
+    run('vm_stat'),
+    run('sysctl -n vm.swapusage'),
+    run('sysctl -n vm.page_free_count vm.page_speculative_count vm.vm_page_external_count 2>/dev/null')
+  ]);
   const page = 16384;
   const get = (name) => {
     const m = vmStat.match(new RegExp(name + ':\\s+(\\d+)'));
@@ -156,11 +160,24 @@ async function localMem() {
   const wired = get('Pages wired down'), compressed = get('Pages occupied by compressor');
   const purgeable = get('Pages purgeable'), speculative = get('Pages speculative');
   const total = (staticInfo && staticInfo.memTotal) || 16 * GB;
-  const used = Math.min(total, active + wired + compressed + Math.max(0, inactive - purgeable));
+  // 活动监视器口径（同时刻实测拟合，误差 ≤0.01GB）：
+  //   已使用 = 总内存 − 空闲 − 投机(speculative) − 文件缓存(external file-backed)
+  // 等价于「除空闲/预取/文件缓存外全部计入」。旧公式把 inactive 文件缓存全算已用，虚高 ~23 个百分点
+  const pc = pageCounts.trim().split('\n').map(l => parseInt(l.trim(), 10) || 0);
+  let used, fileCache;
+  if (pc.length === 3 && pc.some(n => n > 0)) {
+    fileCache = pc[2] * page;
+    used = Math.min(total, Math.max(0, total - (pc[0] + pc[1] + pc[2]) * page));
+  } else {
+    // sysctl 不可用时的降级：近似（偏大）
+    fileCache = Math.max(0, inactive - purgeable);
+    used = Math.min(total, active + wired + compressed + fileCache);
+  }
   const sm = swap.match(/total\s*=\s*([\d.]+)M\s+used\s*=\s*([\d.]+)M/);
   return {
     total, used, avail: Math.max(0, total - used),
     active, wired, compressed, inactive, free, purgeable, speculative,
+    fileCache,
     swapTotal: sm ? parseFloat(sm[1]) * MB : 0,
     swapUsed: sm ? parseFloat(sm[2]) * MB : 0
   };
@@ -446,7 +463,7 @@ function buildLocalPayload() {
     },
     mem: Object.assign({}, mem, {
       percent: mem.total ? mem.used / mem.total * 100 : 0,
-      cached: mem.inactive || 0, buffers: mem.speculative || 0, shmem: 0, anon: mem.active || 0,
+      cached: mem.fileCache || 0, buffers: mem.speculative || 0, shmem: 0, anon: mem.active || 0,
       style: 'mac'
     }),
     disk: { devices: [{ name: 'disk0', r: lDisk, w: 0, combined: true }], totalR: lDisk, totalW: 0, tps: lDiskTps, kbt: lDiskKbt, volumes: lVolumes },

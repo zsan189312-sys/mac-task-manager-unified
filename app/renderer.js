@@ -403,7 +403,7 @@ const detailDefs = {
         ['活跃 (active)', m.active || 0, '#bf5af2'],
         ['联动 (wired)', m.wired || 0, '#0a84ff'],
         ['压缩 (compressed)', m.compressed || 0, '#ff9f0a'],
-        ['非活跃缓存 (inactive)', m.cached || 0, '#30d158'],
+        ['文件缓存 (cached)', m.cached || 0, '#30d158'],
         ['可用', m.avail || 0, 'rgba(235,240,248,0.3)']
       ] : [
         ['已使用（匿名）', m.anon, '#bf5af2'], ['缓存 + 可回收', m.cached, '#0a84ff'],
