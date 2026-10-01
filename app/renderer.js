@@ -6,16 +6,21 @@ function newHist() { return { cpu: [], mem: [], disk: [], netrx: [], nettx: [], 
 let hist = newHist();
 // 按主机保留历史曲线：切换主机时保存当前缓冲、切回时恢复，避免重新采样从零开始
 const histCache = {}; // hostId -> hist
+let histHostId = null; // 曲线缓冲当前归属的主机：点切换即绑定，不等首帧数据
+let switchAt = 0;      // 最近一次切换主机的时刻，用于识别切换瞬间在途的旧主机数据帧
 // 离开某台主机时在其各条曲线上打一个断点（null）：切回后线条在断档处断开，
 // 而不是把「离开期间的空白」压缩成一条连续的假线
 function markGap(h) {
   SERIES_KEYS.forEach(k => { if (Array.isArray(h[k]) && h[k].length) h[k].push(null); });
   (h.cores || []).forEach(a => { if (Array.isArray(a) && a.length) a.push(null); });
 }
+// 幂等：重复调用同一个目标主机不会重复打断点、更不会把缓存覆盖成空缓冲
 function switchHist(toId) {
-  if (currentHostId) { markGap(hist); histCache[currentHostId] = hist; }
+  if (!toId || histHostId === toId) return;
+  if (histHostId) { markGap(hist); histCache[histHostId] = hist; }
   hist = histCache[toId] || newHist();
   histCache[toId] = hist;
+  histHostId = toId;
 }
 
 const CARD_DEFS = {
@@ -141,12 +146,34 @@ async function renderHostSeg() {
     el.innerHTML = `<span class="hdot ${h.kind}"></span>${esc(h.name)}` +
       (h.kind === 'remote' ? '<span class="hx" title="移除">×</span>' : '');
     el.onclick = async (ev) => {
-      if (ev.target.classList.contains('hx')) {
-        await window.bridge.removeHost(h.id); delete histCache[h.id]; renderHostSeg(); return;
+      try {
+        if (ev.target.classList.contains('hx')) {          // 删除主机
+          const wasActive = h.id === r.active;
+          await window.bridge.removeHost(h.id);
+          delete histCache[h.id];
+          if (wasActive) {                                  // 删掉的正是当前主机：立刻改绑新的 active
+            switchAt = Date.now();
+            const r2 = await window.bridge.getHosts();
+            histHostId = null;
+            switchHist(r2.active);
+            resetForHostSwitch();
+          }
+          return;
+        }
+        if (h.id === r.active) return;
+        if (!(await window.bridge.setHost(h.id))) return;
+        switchAt = Date.now();
+        resetForHostSwitch();
+        // 关键：立刻把曲线缓冲改绑到目标主机并刷新横轴刻度，不等首帧数据。
+        // 否则切回 N100 时界面会先按上一台主机的缓冲绘制/空等一个轮询周期，看起来像「曲线没了」
+        switchHist(h.id);
+        histIntervalMs = h.kind === 'local' ? 2000 : (r.intervalMs || histIntervalMs);
+        updateAxisLabels();
+      } catch (err) {
+        console.error('host switch error', err);
+      } finally {
+        renderHostSeg();   // 无论成败都刷新，避免 chips 停在旧 active 上导致后续点击被判为「已激活」而失效
       }
-      if (h.id === r.active) return;
-      await window.bridge.setHost(h.id);
-      resetForHostSwitch(); renderHostSeg();
     };
     seg.appendChild(el);
   });
@@ -727,7 +754,14 @@ function selectCard(id) {
 // 启动直达：/tmp/tm_view 写主机 id 或页签名
 window.__initView = async (v) => {
   const hosts = hostList.length ? hostList : ((await window.bridge.getHosts()).hosts || []);
-  if (hosts.some(h => h.id === v)) { await window.bridge.setHost(v); resetForHostSwitch(); renderHostSeg(); return; }
+  if (hosts.some(h => h.id === v)) {
+    if (v !== currentHostId) {
+      if (await window.bridge.setHost(v)) {
+        switchAt = Date.now(); resetForHostSwitch(); switchHist(v);
+      }
+    }
+    renderHostSeg(); return;
+  }
   if (['perf', 'procs', 'docker'].includes(v)) switchView(v);
   else selectCard(v);
 };
@@ -743,7 +777,10 @@ document.querySelectorAll('#poll-ctl button').forEach(btn => {
   btn.onclick = () => {
     document.querySelectorAll('#poll-ctl button').forEach(b => b.classList.remove('on'));
     btn.classList.add('on');
-    try { window.bridge.setInterval(parseInt(btn.dataset.ms, 10)); } catch (e) { }
+    const ms = parseInt(btn.dataset.ms, 10);
+    try { window.bridge.setInterval(ms); } catch (e) { }
+    // 远程档位变化立刻反映到横轴刻度（下一个数据帧也会带着新 interval 覆盖）
+    if (latest && latest.host.kind !== 'local') { histIntervalMs = ms; updateAxisLabels(); }
   };
 });
 window.addEventListener('keydown', e => {
@@ -760,10 +797,15 @@ window.addEventListener('keyup', e => { if (!e.metaKey) document.body.classList.
 
 // ---------- 主循环 ----------
 window.bridge.onStats((d) => {
-  const hostChanged = (d.host && d.host.id) !== currentHostId;
+  const hid = d.host && d.host.id;
+  if (!hid) return;
+  // 切换主机瞬间，上一台主机可能还有一帧在途：它的构建时间早于切换动作，
+  // 丢弃它，避免把 A 主机的采样点画进 B 主机的曲线里
+  if (histHostId && hid !== histHostId && (d.ts || 0) < switchAt) return;
+  const hostChanged = hid !== currentHostId;
   if (hostChanged) {
-    switchHist(d.host.id);   // 保存旧主机曲线、恢复新主机曲线（切回不丢）
-    currentHostId = d.host.id;
+    switchHist(hid);         // 保存旧主机曲线、恢复新主机曲线（幂等：点切换时已改绑过）
+    currentHostId = hid;
     bodyBuilt = false; builtKey = '';
     if (!cardsFor(d).includes(activeCard)) activeCard = 'cpu';
     buildSidebarFor(d);

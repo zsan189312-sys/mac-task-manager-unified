@@ -572,10 +572,11 @@ function buildRemotePayload() {
 // ================================================================ 轮询调度
 let timer = null;
 let polling = false;
+let pendingPoll = false;   // 采集进行中又被请求（切主机的立即刷新）：等本次结束后补采一次
 async function poll() {
   // 重入保护：机器高负载时单次采集可能超过轮询间隔（本机 iostat 就有 1 秒窗口），
   // 否则定时器会叠加出多路并发采集，既让差分基准互相覆盖又白吃 CPU
-  if (polling) return;
+  if (polling) { pendingPoll = true; return; }
   if (!win || win.isDestroyed()) return;
   const host = currentHost;
   polling = true;
@@ -587,7 +588,13 @@ async function poll() {
     if (host !== currentHost) return;
     win.webContents.send('stats', host.kind === 'local' ? buildLocalPayload() : buildRemotePayload());
   } catch (e) { console.error('poll error', e); }
-  finally { polling = false; }
+  finally {
+    polling = false;
+    // 补采：切换主机时若正有一次采集在途，set-host 发起的立即 poll 会被上面挡掉，
+    // 只能等下一个定时器（远程最长 10 秒）——界面要空等这么久才切过来。这里补一次，
+    // 让切换在 1 个采集周期内生效。
+    if (pendingPoll) { pendingPoll = false; poll(); }
+  }
 }
 function schedule() {
   if (timer) { clearInterval(timer); timer = null; }
