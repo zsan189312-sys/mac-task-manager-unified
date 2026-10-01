@@ -27,6 +27,9 @@ function switchHist(toId) {
   hist = histCache[toId] || newHist();
   histCache[toId] = hist;
   histHostId = toId;
+  // 兜底同步横轴时间窗：本机固定 2 秒（自动切换路径如「删除当前主机」不走点击处理）
+  const t = hostList.find(h => h.id === toId);
+  if (t && t.kind === 'local') histIntervalMs = 2000;
 }
 
 const CARD_DEFS = {
@@ -154,7 +157,8 @@ async function renderHostSeg() {
     el.onclick = async (ev) => {
       try {
         if (ev.target.classList.contains('hx')) {          // 删除主机
-          const wasActive = h.id === r.active;
+          const cur0 = await window.bridge.getHosts();      // 以主进程真实状态判断，避免闭包快照过期
+          const wasActive = h.id === cur0.active;
           await window.bridge.removeHost(h.id);
           delete histCache[h.id];
           if (wasActive) {                                  // 删掉的正是当前主机：立刻改绑新的 active
@@ -163,18 +167,17 @@ async function renderHostSeg() {
             histHostId = null;
             switchHist(r2.active);
             resetForHostSwitch();
+            const nh = (r2.hosts || []).find(x => x.id === r2.active);
+            setText('sb-left', `已删除主机，切换到 ${(nh && nh.name) || r2.active}…`);
           }
           return;
         }
-        if (h.id === r.active) return;
-        if (!(await window.bridge.setHost(h.id))) return;
-        switchAt = Date.now();
-        resetForHostSwitch();
-        // 关键：立刻把曲线缓冲改绑到目标主机并刷新横轴刻度，不等首帧数据。
-        // 否则切回 N100 时界面会先按上一台主机的缓冲绘制/空等一个轮询周期，看起来像「曲线没了」
-        switchHist(h.id);
-        histIntervalMs = h.kind === 'local' ? 2000 : (r.intervalMs || histIntervalMs);
-        updateAxisLabels();
+        // 以主进程的真实激活状态为准判断「是不是已经在看这台」：
+        // 之前用渲染时的闭包快照 r.active，一旦它与实际不一致（自动切换、外部切换过主机），
+        // 点这台主机就会被判成「已激活」而静默失效，完全点不动
+        const cur = await window.bridge.getHosts();
+        if (h.id === cur.active) { renderHostSeg(); return; }
+        await applyHostSwitch(h.id, h, cur.intervalMs);
       } catch (err) {
         console.error('host switch error', err);
       } finally {
@@ -199,6 +202,19 @@ function resetForHostSwitch() {
   buildSidebarFor(null, true);
 }
 
+// 统一切换入口（主机 chip 点击 / 启动直达都用它）：
+// 主进程切 → 曲线缓冲立刻改绑目标主机 → 横轴刻度 → 状态栏提示
+async function applyHostSwitch(id, host, intervalMs) {
+  if (!(await window.bridge.setHost(id))) return false;
+  switchAt = Date.now();
+  resetForHostSwitch();
+  switchHist(id);   // 不等首帧：立刻恢复该主机缓存的曲线
+  histIntervalMs = (host && host.kind === 'local') ? 2000 : (intervalMs || histIntervalMs);
+  updateAxisLabels();
+  setText('sb-left', `正在切换到 ${(host && host.name) || id}…`);
+  return true;
+}
+
 document.getElementById('hf-cancel').onclick = () => document.getElementById('host-form').classList.remove('on');
 document.getElementById('hf-ok').onclick = async () => {
   const name = document.getElementById('hf-name').value.trim();
@@ -214,18 +230,24 @@ document.getElementById('hf-ok').onclick = async () => {
 };
 
 // ---------- 侧栏 ----------
+// 最近一次已知的卡片集合：切换主机的空档期（上一台已停、新主机首帧还没到）沿用上一次的集合，
+// 避免 GPU/电池/功耗卡片闪一下不见，也避免此时点卡片把选择重置成 CPU
+let lastCardIds = ['cpu', 'mem', 'disk', 'net'];
+let sidebarSig = '';
 function cardsFor(d) {
+  if (!d) return lastCardIds.slice();
   const ids = ['cpu'];
-  if (d && d.gpu) ids.push('gpu');   // GPU 紧跟 CPU（本机核显 / 远程 N100 核显）
+  if (d.gpu) ids.push('gpu');   // GPU 紧跟 CPU（本机核显 / 远程 N100 核显）
   ids.push('mem', 'disk', 'net');
-  if (d && d.batt) ids.push('batt');
-  if (d && d.power) ids.push('power');
+  if (d.batt) ids.push('batt');
+  if (d.power) ids.push('power');
   return ids;
 }
 function buildSidebarFor(d, keepCard) {
   const sb = document.getElementById('sidebar');
   sb.innerHTML = '';
-  const ids = cardsFor(d);
+  const ids = d ? cardsFor(d) : lastCardIds.slice();
+  if (d) { lastCardIds = ids.slice(); sidebarSig = ids.join(','); }
   if (!keepCard && !ids.includes(activeCard)) activeCard = 'cpu';
   ids.forEach(id => {
     const c = CARD_DEFS[id];
@@ -761,11 +783,7 @@ function selectCard(id) {
 window.__initView = async (v) => {
   const hosts = hostList.length ? hostList : ((await window.bridge.getHosts()).hosts || []);
   if (hosts.some(h => h.id === v)) {
-    if (v !== currentHostId) {
-      if (await window.bridge.setHost(v)) {
-        switchAt = Date.now(); resetForHostSwitch(); switchHist(v);
-      }
-    }
+    if (v !== currentHostId) await applyHostSwitch(v, hosts.find(h => h.id === v));
     renderHostSeg(); return;
   }
   if (['perf', 'procs', 'docker'].includes(v)) switchView(v);
@@ -836,6 +854,13 @@ window.bridge.onStats((d) => {
     if (!cardsFor(d).includes(activeCard)) activeCard = 'cpu';
     buildSidebarFor(d);
     document.getElementById('poll-ctl').classList.toggle('disabled', d.host.kind === 'local');
+    renderHostSeg();         // 同步顶部主机 chips（含主进程自动切换的情形，保证高亮与实际一致）
+  } else if (cardsFor(d).join(',') !== sidebarSig) {
+    // 卡片集合变了（例如远程首帧之后才拿到核显 GPU / 本机电池状态变化）也要重建侧栏，
+    // 否则新出现的卡片永远不显示
+    bodyBuilt = false; builtKey = '';
+    if (!cardsFor(d).includes(activeCard)) activeCard = 'cpu';
+    buildSidebarFor(d);
   }
   latest = d;
   histIntervalMs = (d.link && d.link.interval) || (d.host.kind === 'local' ? 2000 : histIntervalMs);
