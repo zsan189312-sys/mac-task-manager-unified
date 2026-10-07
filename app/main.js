@@ -254,9 +254,12 @@ async function localBattery() {
   const num = (k) => {
     const m = io.match(new RegExp('"' + k + '"\\s*=\\s*(-?\\d+)'));
     if (!m) return null;
-    let n = parseInt(m[1], 10);
-    if (n > 9007199254740991) n = n - Math.pow(2, 64); // 放电电流被打成 64 位无符号
-    return n;
+    // ioreg 对负数（如放电电流）输出 64 位补码无符号形式（接近 2^64）。
+    // 必须用 BigInt 解析：Number 在此量级（≥2^63）舍入步长为 2048，
+    // parseInt 会把 -346 的补码舍入到恰好 2^64，减去 2^64 后得 0。
+    let n = BigInt(m[1]);
+    if (n > 9223372036854775807n) n -= 18446744073709551616n; // > 2^63-1 → 转有符号
+    return Number(n);
   };
   const bool = (k) => new RegExp('"' + k + '"\\s*=\\s*Yes').test(io);
   const voltage = num('Voltage'), amperage = num('InstantAmperage');
