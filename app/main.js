@@ -281,7 +281,6 @@ async function localBattery() {
     amperage, watts: voltage && amperage ? (voltage * amperage) / 1e6 : null,
     nominal: nom,   // 标称满充容量 mAh，供渲染端估算「预计使用时间」（剩余mAh ÷ 当前电流）
     design: des,    // 设计出厂容量 mAh（电池容量 = 满充/设计）
-    remainingMah: num('RemainingCapacity'),   // 剩余电荷 mAh（BatteryData.RemainingCapacity）
     cycle: num('CycleCount'),
     health,
     // AdapterDetails 仅在接通电源时存在：Watts=充电器额定功率，AdapterVoltage=mV，Current=mA
