@@ -280,6 +280,7 @@ async function localBattery() {
     voltage: voltage ? voltage / 1000 : null,
     amperage, watts: voltage && amperage ? (voltage * amperage) / 1e6 : null,
     nominal: nom,   // 标称满充容量 mAh，供渲染端估算「预计使用时间」（剩余mAh ÷ 当前电流）
+    remainingMah: num('RemainingCapacity'),   // 剩余电荷 mAh（BatteryData.RemainingCapacity）
     cycle: num('CycleCount'),
     health
   };
