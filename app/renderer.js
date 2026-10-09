@@ -43,6 +43,7 @@ const CARD_DEFS = {
 };
 let activeCard = 'cpu';
 let latest = null;
+let battEstEma = null;   // 电池「预计使用时间」的指数滑动平均（小时）
 let procSort = 'cpu';
 let procQuery = '';
 let bodyBuilt = false;
@@ -593,10 +594,11 @@ const detailDefs = {
           <div class="info-item"><div class="info-label">实时电流</div><div class="info-value" id="batt-amp">—</div></div>
           <div class="info-item"><div class="info-label">电压</div><div class="info-value" id="batt-volt">—</div></div>
           <div class="info-item"><div class="info-label">实时功率</div><div class="info-value" id="batt-watt">—</div></div>
+          <div class="info-item"><div class="info-label">预计使用</div><div class="info-value" id="batt-est">—</div></div>
           <div class="info-item"><div class="info-label">电池健康</div><div class="info-value" id="batt-health">—</div></div>
           <div class="info-item"><div class="info-label">循环次数</div><div class="info-value" id="batt-cycle">—</div></div>
         </div>
-        <div class="section-title">数据源：AppleSmartBattery（电压×电流 = 真实功率）</div>`;
+        <div class="section-title">数据源：AppleSmartBattery（电压×电流 = 真实功率；预计使用 = 剩余电量 ÷ 当前放电电流）</div>`;
     },
     update(d) {
       const b = d.batt || {};
@@ -610,6 +612,21 @@ const detailDefs = {
       setText('batt-volt', b.voltage ? b.voltage.toFixed(2) + ' V' : '—');
       setText('batt-watt', b.watts !== null && b.watts !== undefined
         ? (b.watts > 0 ? '+' : '') + b.watts.toFixed(1) + ' W（' + (b.watts > 0 ? '充入' : '输出') + '）' : '—');
+      // 预计使用时间：剩余电荷(mAh) ÷ |放电电流|(mA)。瞬时电流波动大，用 EMA 平滑（α=0.3）。
+      // 充电/接通电源时不显示；>99 小时封顶。
+      let estTxt = '—';
+      if (b.present && b.status === 'discharging' && b.nominal > 0 && b.percent > 0 && b.amperage < 0) {
+        const hours = (b.percent / 100 * b.nominal) / -b.amperage;
+        if (isFinite(hours) && hours > 0) {
+          if (battEstEma === null) battEstEma = hours;
+          else battEstEma = battEstEma * 0.7 + hours * 0.3;
+          const h = Math.floor(battEstEma), m = Math.round((battEstEma - h) * 60);
+          estTxt = battEstEma > 99 ? '99+ 小时' : (h > 0 ? `${h} 小时 ${m} 分钟` : `${m} 分钟`);
+        }
+      } else {
+        battEstEma = null;   // 离开放电状态后重新收敛
+      }
+      setText('batt-est', estTxt);
       setText('batt-health', b.health ? b.health + '%' : '—');
       setText('batt-cycle', b.cycle !== null && b.cycle !== undefined ? b.cycle + ' 次' : '—');
     },
@@ -617,7 +634,12 @@ const detailDefs = {
       const b = d.batt || {};
       if (!b.present) return '无电池';
       const dir = b.watts > 0 ? '充电输入' : '放电输出';
-      return `${b.status === 'charging' ? '充电中' : b.status === 'discharging' ? '使用电池' : '已接通电源'} · ${dir} ${Math.abs(b.watts || 0).toFixed(1)} W`;
+      let est = '';
+      if (b.status === 'discharging' && b.nominal > 0 && b.percent > 0 && b.amperage < 0) {
+        const hours = (b.percent / 100 * b.nominal) / -b.amperage;
+        if (isFinite(hours) && hours > 0) est = ` · 约 ${hours >= 10 ? Math.round(hours) : hours.toFixed(1)} 小时`;
+      }
+      return `${b.status === 'charging' ? '充电中' : b.status === 'discharging' ? '使用电池' : '已接通电源'} · ${dir} ${Math.abs(b.watts || 0).toFixed(1)} W${est}`;
     }
   },
   power: {
