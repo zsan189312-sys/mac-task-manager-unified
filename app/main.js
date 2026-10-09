@@ -280,9 +280,18 @@ async function localBattery() {
     voltage: voltage ? voltage / 1000 : null,
     amperage, watts: voltage && amperage ? (voltage * amperage) / 1e6 : null,
     nominal: nom,   // 标称满充容量 mAh，供渲染端估算「预计使用时间」（剩余mAh ÷ 当前电流）
+    design: des,    // 设计出厂容量 mAh（电池容量 = 满充/设计）
     remainingMah: num('RemainingCapacity'),   // 剩余电荷 mAh（BatteryData.RemainingCapacity）
     cycle: num('CycleCount'),
-    health
+    health,
+    // AdapterDetails 仅在接通电源时存在：Watts=充电器额定功率，AdapterVoltage=mV，Current=mA
+    adapterWatts: (io.match(/"AdapterDetails"[^}]*?"Watts"\s*=\s*(\d+)/) || [])[1]
+      ? parseInt(io.match(/"AdapterDetails"[^}]*?"Watts"\s*=\s*(\d+)/)[1], 10) : null,
+    adapterVolt: (io.match(/"AdapterDetails"[^}]*?"AdapterVoltage"\s*=\s*(\d+)/) || [])[1]
+      ? parseInt(io.match(/"AdapterDetails"[^}]*?"AdapterVoltage"\s*=\s*(\d+)/)[1], 10) / 1000 : null,
+    // PowerTelemetryData.SystemPowerIn：整机从适配器实际取电功率（mW），含电池充电+系统负载+适配器损耗
+    sysPowerIn: (io.match(/"SystemPowerIn"\s*=\s*(\d+)/) || [])[1]
+      ? parseInt(io.match(/"SystemPowerIn"\s*=\s*(\d+)/)[1], 10) / 1000 : null
   };
 }
 

@@ -598,6 +598,10 @@ const detailDefs = {
           <div class="info-item"><div class="info-label"><span id="batt-est-label">预计使用</span></div><div class="info-value" id="batt-est">—</div></div>
           <div class="info-item"><div class="info-label">电池健康</div><div class="info-value" id="batt-health">—</div></div>
           <div class="info-item"><div class="info-label">循环次数</div><div class="info-value" id="batt-cycle">—</div></div>
+          <div class="info-item"><div class="info-label">电池容量</div><div class="info-value" id="batt-cap">—</div></div>
+          <div class="info-item"><div class="info-label">剩余电荷</div><div class="info-value" id="batt-remain">—</div></div>
+          <div class="info-item"><div class="info-label">充电器</div><div class="info-value" id="batt-adapter">—</div></div>
+          <div class="info-item"><div class="info-label">系统输入功率</div><div class="info-value" id="batt-sysin">—</div></div>
         </div>
         <div class="section-title">数据源：AppleSmartBattery（电压×电流 = 真实功率；预计使用/充满 = 电量变化 ÷ 当前电流）</div>`;
     },
@@ -641,6 +645,15 @@ const detailDefs = {
       else setText('batt-time', b.timeRemaining || '—');
       setText('batt-health', b.health ? b.health + '%' : '—');
       setText('batt-cycle', b.cycle !== null && b.cycle !== undefined ? b.cycle + ' 次' : '—');
+      // 电池容量：满充标称 / 设计出厂（mAh）
+      setText('batt-cap', b.nominal > 0 && b.design > 0 ? `${b.nominal} / ${b.design} mAh` : '—');
+      // 剩余电荷：电量 % 的绝对值（mAh）
+      setText('batt-remain', b.remainingMah > 0 ? b.remainingMah + ' mAh' : '—');
+      // 充电器：额定功率 · 协商电压（仅接通电源时显示）
+      setText('batt-adapter', b.adapterWatts > 0
+        ? `${b.adapterWatts} W${b.adapterVolt ? ' · ' + b.adapterVolt.toFixed(1) + 'V' : ''}` : '—');
+      // 系统输入功率：整机从适配器取电（含充电+系统负载+适配器损耗）
+      setText('batt-sysin', b.sysPowerIn > 0 ? b.sysPowerIn.toFixed(1) + ' W' : '—');
     },
     meta(d) {
       const b = d.batt || {};
