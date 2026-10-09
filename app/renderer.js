@@ -633,7 +633,8 @@ const detailDefs = {
         if (hours !== null && isFinite(hours) && hours > 0) {
           if (battEstEma === null) battEstEma = hours;
           else battEstEma = battEstEma * 0.7 + hours * 0.3;
-          const h = Math.floor(battEstEma), m = Math.round((battEstEma - h) * 60);
+          let h = Math.floor(battEstEma), m = Math.round((battEstEma - h) * 60);
+          if (m === 60) { h++; m = 0; }   // x.999h 边界：round 出 60 分钟
           estTxt = battEstEma > 99 ? '99+ 小时' : (h > 0 ? `${h} 小时 ${m} 分钟` : `${m} 分钟`);
         }
       }
