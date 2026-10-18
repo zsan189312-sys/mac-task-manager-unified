@@ -43,8 +43,9 @@ const CARD_DEFS = {
 };
 let activeCard = 'cpu';
 let latest = null;
-let battEstEma = null;   // 电池「预计使用/充满时间」的指数滑动平均（小时）
-let battEstState = null; // 上次估算时的电池状态（放电/充电/接通），切换时重置 EMA
+let battEstBuf = [];     // 电池估算最近的有效样本（小时），取中位数抗毛刺
+let battEstAt = 0;       // 上次推入样本的时间戳，按时间间隔去重（电池每 6s 刷新，渲染每 2s）
+let battEstState = null; // 上次估算时的电池状态（放电/充电/接通），切换时清空缓冲
 let procSort = 'cpu';
 let procQuery = '';
 let bodyBuilt = false;
@@ -617,25 +618,36 @@ const detailDefs = {
       setText('batt-watt', b.watts !== null && b.watts !== undefined
         ? (b.watts > 0 ? '+' : '') + b.watts.toFixed(1) + ' W（' + (b.watts > 0 ? '充入' : '输出') + '）' : '—');
       // 预计使用 / 预计充满：剩余或缺口电荷(mAh) ÷ |当前电流|(mA)。
-      // 瞬时电流波动大，用 EMA 平滑（α=0.3），状态切换时重新收敛。
-      // pmset 充电时给 (no estimate)，充满时间用它兜底；>99 小时封顶。
+      // 瞬时电流在 PD 协商/负载波动时抖动大（曾出现 0.1A 毛刺 → 22 小时假值），
+      // 因此：①丢弃电流过小的过渡拍；②攒够 3 个有效样本后取中位数，抗单点毛刺；
+      // ③按数据签名去重，避免 2s 渲染帧重复推入同一拍样本。
       let estTxt = '—', estLabel = '预计使用';
-      if (battEstState !== b.status) { battEstEma = null; battEstState = b.status; }
-      if (b.present && b.nominal > 0 && b.percent > 0 && b.amperage) {
-        let hours = null;
+      if (battEstState !== b.status) { battEstBuf = []; battEstAt = 0; battEstState = b.status; }
+      if (b.present && b.nominal > 0 && b.percent > 0 && b.percent < 100 && b.amperage) {
+        let hours = null, minAmp = 0;
         if (b.status === 'discharging' && b.amperage < 0) {
           hours = (b.percent / 100 * b.nominal) / -b.amperage;
-          estLabel = '预计使用';
+          estLabel = '预计使用'; minAmp = 150;      // 放电 <150mA 多为静置毛刺
         } else if (b.status === 'charging' && b.amperage > 0) {
           hours = ((100 - b.percent) / 100 * b.nominal) / b.amperage;
-          estLabel = '预计充满';
+          estLabel = '预计充满'; minAmp = 300;      // 充电 <300mA 是协商/爬坡期，算出来是假值
         }
-        if (hours !== null && isFinite(hours) && hours > 0) {
-          if (battEstEma === null) battEstEma = hours;
-          else battEstEma = battEstEma * 0.7 + hours * 0.3;
-          let h = Math.floor(battEstEma), m = Math.round((battEstEma - h) * 60);
-          if (m === 60) { h++; m = 0; }   // x.999h 边界：round 出 60 分钟
-          estTxt = battEstEma > 99 ? '99+ 小时' : (h > 0 ? `${h} 小时 ${m} 分钟` : `${m} 分钟`);
+        if (hours !== null && isFinite(hours) && hours > 0 && Math.abs(b.amperage) >= minAmp) {
+          // 按时间间隔去重：电池数据 6s 才刷新一次，而本函数每 2s 被调用一次，
+          // 不能用「值是否变化」判断（电量/电流稳定时会永远攒不满样本）。
+          const now = Date.now();
+          if (now - battEstAt >= 4000) {
+            battEstBuf.push(hours);
+            if (battEstBuf.length > 3) battEstBuf.shift();
+            battEstAt = now;
+          }
+          if (battEstBuf.length >= 3) {
+            const sorted = [...battEstBuf].sort((x, y) => x - y);
+            const med = sorted[Math.floor(sorted.length / 2)];
+            let h = Math.floor(med), m = Math.round((med - h) * 60);
+            if (m === 60) { h++; m = 0; }   // x.999h 边界：round 出 60 分钟
+            estTxt = med > 99 ? '99+ 小时' : (h > 0 ? `${h} 小时 ${m} 分钟` : `${m} 分钟`);
+          }
         }
       }
       setText('batt-est-label', estLabel);
@@ -658,12 +670,17 @@ const detailDefs = {
       if (!b.present) return '无电池';
       const dir = b.watts > 0 ? '充电输入' : '放电输出';
       let est = '';
-      if (b.status === 'discharging' && b.nominal > 0 && b.percent > 0 && b.amperage < 0) {
-        const hours = (b.percent / 100 * b.nominal) / -b.amperage;
-        if (isFinite(hours) && hours > 0) est = ` · 约 ${hours >= 10 ? Math.round(hours) : hours.toFixed(1)} 小时`;
-      } else if (b.status === 'charging' && b.nominal > 0 && b.percent > 0 && b.amperage > 0) {
-        const hours = ((100 - b.percent) / 100 * b.nominal) / b.amperage;
-        if (isFinite(hours) && hours > 0) est = ` · 约 ${hours >= 10 ? Math.round(hours) : hours.toFixed(1)} 小时后充满`;
+      // 与详情页同源：优先用中位数样本，样本不足时用瞬时值但过滤协商/爬坡期的微小电流
+      let hours = null;
+      if (battEstState === b.status && battEstBuf.length >= 3) {
+        const s = [...battEstBuf].sort((x, y) => x - y);
+        hours = s[Math.floor(s.length / 2)];
+      } else if (b.nominal > 0 && b.percent > 0) {
+        if (b.status === 'discharging' && b.amperage <= -150) hours = (b.percent / 100 * b.nominal) / -b.amperage;
+        else if (b.status === 'charging' && b.amperage >= 300) hours = ((100 - b.percent) / 100 * b.nominal) / b.amperage;
+      }
+      if (hours !== null && isFinite(hours) && hours > 0 && hours <= 99) {
+        est = ` · 约 ${hours >= 10 ? Math.round(hours) : hours.toFixed(1)} ${b.status === 'charging' ? '小时后充满' : '小时'}`;
       }
       return `${b.status === 'charging' ? '充电中' : b.status === 'discharging' ? '使用电池' : '已接通电源'} · ${dir} ${Math.abs(b.watts || 0).toFixed(1)} W${est}`;
     }
