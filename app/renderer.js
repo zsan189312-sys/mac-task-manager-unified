@@ -128,6 +128,46 @@ function drawSeries(cv, data, color, yMax) {
   strokeSeries(ctx, data, x0, step, h, seriesMax(yMax, valid), color, true);
 }
 
+// 双向曲线：零基线居中、正负对称缩放。用于电池充放电功率（充入为正 / 放出为负）。
+function drawBipolar(cv, data, color) {
+  if (!cv) return;
+  const { ctx, w, h } = setupCanvas(cv);
+  ctx.clearRect(0, 0, w, h);
+  if (!data || data.length < 2) return;
+  const valid = data.filter(isNum);
+  if (valid.length < 2) return;
+  const maxAbs = Math.max(1, ...valid.map(v => Math.abs(v))) * 1.15;
+  const mid = h / 2;
+  // 零基线
+  ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid);
+  ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1; ctx.stroke();
+  const step = w / (HIST - 1);
+  const x0 = w - (data.length - 1) * step;
+  let seg = [];
+  const flush = () => {
+    if (seg.length >= 2) {
+      ctx.beginPath();
+      seg.forEach((p, i) => i === 0 ? ctx.moveTo(p[0], p[1]) : ctx.lineTo(p[0], p[1]));
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.stroke();
+      // 向零基线淡填充，强调充电/放电方向
+      ctx.lineTo(seg[seg.length - 1][0], mid); ctx.lineTo(seg[0][0], mid); ctx.closePath();
+      ctx.fillStyle = color + '14'; ctx.fill();
+    }
+    seg = [];
+  };
+  data.forEach((v, i) => {
+    if (!isNum(v)) { flush(); return; }
+    seg.push([x0 + i * step, mid - (v / maxAbs) * (mid - 2)]);
+  });
+  flush();
+}
+
+// 电池功率颜色：充入橙、放出蓝
+function battPowerColor(d) {
+  const wv = d && d.batt ? d.batt.watts : null;
+  return (typeof wv === 'number' && wv > 0) ? '#ff9f0a' : '#0a84ff';
+}
+
 function drawOverlaid(cv, primary, secondary, c1, c2) {
   drawSeries(cv, primary, c1);
   if (!cv || !secondary || secondary.length < 2) return;
@@ -305,7 +345,7 @@ function updateSidebar(d) {
   // 接收与发送必须叠加绘制：drawSeries 会先 clearRect，连续调两次只会剩下发送曲线
   drawOverlaid(document.getElementById('spark-net'), hist.netrx, hist.nettx, '#ffd60a', '#ff453a');
   if (d.gpu) drawSeries(document.getElementById('spark-gpu'), hist.gpu, '#64d2ff', 100);
-  if (d.batt) drawSeries(document.getElementById('spark-batt'), hist.batt, '#ff9f0a', 100);
+  if (d.batt) drawBipolar(document.getElementById('spark-batt'), hist.batt, battPowerColor(d));
   if (d.power) drawSeries(document.getElementById('spark-power'), hist.power, '#ff9f0a');
 }
 
@@ -603,7 +643,7 @@ const detailDefs = {
           <div class="info-item"><div class="info-label">循环次数</div><div class="info-value" id="batt-cycle">—</div></div>
           <div class="info-item"><div class="info-label">电池容量</div><div class="info-value" id="batt-cap">—</div></div>
         </div>
-        <div class="section-title">数据源：AppleSmartBattery（电压×电流 = 真实功率；预计使用/充满 = 电量变化 ÷ 当前电流）</div>`;
+        <div class="section-title">数据源：AppleSmartBattery（电压×电流 = 真实功率；曲线 = 充放电功率，充电在上/放电在下；预计使用/充满 = 电量变化 ÷ 当前电流）</div>`;
     },
     update(d) {
       const b = d.batt || {};
@@ -744,8 +784,9 @@ function tickDetail(force) {
       drawSeries(big, hist.gpu, '#64d2ff', 100);
       setText('chart-max', '100%');
     } else if (activeCard === 'batt') {
-      drawSeries(big, hist.batt, '#ff9f0a', 100);
-      setText('chart-max', '100%');
+      drawBipolar(big, hist.batt, battPowerColor(latest));
+      const battAbs = Math.max(0, ...hist.batt.filter(isNum).map(Math.abs));
+      setText('chart-max', battAbs > 0 ? '±' + battAbs.toFixed(1) + ' W' : '');
     } else {
       const series = { cpu: hist.cpu, mem: hist.mem, disk: hist.disk };
       const yMax = activeCard === 'mem' ? 100 : undefined;
@@ -918,7 +959,7 @@ window.bridge.onLocalHist((d) => {
   push(h.netrx, m ? m.rx : 0);
   push(h.nettx, m ? m.tx : 0);
   if (d.gpu) push(h.gpu, typeof d.gpu.util === 'number' ? d.gpu.util : (h.gpu.length ? h.gpu[h.gpu.length - 1] : 0));
-  if (d.batt) push(h.batt, d.batt.percent || 0);
+  if (d.batt) push(h.batt, typeof d.batt.watts === 'number' ? d.batt.watts : null);
   d.cpu.cores.forEach((v, i) => {
     if (!h.cores[i]) h.cores[i] = [];
     push(h.cores[i], v);
@@ -959,7 +1000,7 @@ window.bridge.onStats((d) => {
   if (d.power) { push(hist.power, d.power.pkg); const tp = parseFloat(pkgTemp(d)); push(hist.temp, isNaN(tp) ? 0 : tp); }
   // GPU 首帧采样未就绪（util=null）时沿用上一值，避免曲线上出现假 0 尖谷
   if (d.gpu) push(hist.gpu, typeof d.gpu.util === 'number' ? d.gpu.util : (hist.gpu.length ? hist.gpu[hist.gpu.length - 1] : 0));
-  if (d.batt) push(hist.batt, d.batt.percent || 0);
+  if (d.batt) push(hist.batt, typeof d.batt.watts === 'number' ? d.batt.watts : null);
   d.cpu.cores.forEach((v, i) => {
     if (!hist.cores[i]) hist.cores[i] = [];
     push(hist.cores[i], v);
