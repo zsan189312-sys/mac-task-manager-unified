@@ -184,12 +184,12 @@
   .tile canvas { width: 100%; height: 30px; display: block; }
 
   .info-grid {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    /* auto-fit：项目数少于可容纳列数时收缩空列，卡片拉伸填满整行（auto-fill 会留空位） */
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
     gap: 8px; margin-top: 12px;
   }
   .info-grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
-  /* 远程主机（N100）：4 个汇总框随窗口拉伸填满整行，不留空列 */
-  .info-grid.fill { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+  .info-grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
   .info-item { background: var(--surface); border: 1px solid var(--hairline); border-radius: var(--r-sm); padding: 11px 13px; }
   .info-label { color: var(--text-2); font-size: 11px; margin-bottom: 4px; }
   .info-value { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }

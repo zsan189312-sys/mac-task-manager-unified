@@ -542,7 +542,7 @@ const detailDefs = {
   net: {
     build(d) {
       return `
-        <div class="info-grid${d && d.host && d.host.kind === 'remote' ? ' fill' : ''}">
+        <div class="info-grid">
           <div class="info-item"><div class="info-label">总接收 ↓</div><div class="info-value" style="color:#ffd60a" id="net-rx">—</div></div>
           <div class="info-item"><div class="info-label">总发送 ↑</div><div class="info-value" style="color:#ff453a" id="net-tx">—</div></div>
           <div class="info-item"><div class="info-label">主接口</div><div class="info-value" id="net-main">—</div></div>
@@ -629,7 +629,7 @@ const detailDefs = {
   batt: {
     build() {
       return `
-        <div class="info-grid">
+        <div class="info-grid cols-4">
           <div class="info-item"><div class="info-label">电量</div><div class="info-value" id="batt-pct">—</div></div>
           <div class="info-item"><div class="info-label">状态</div><div class="info-value" id="batt-state">—</div></div>
           <div class="info-item"><div class="info-label"><span id="batt-time-label">可用</span>时间</div><div class="info-value" id="batt-time">—</div></div>
