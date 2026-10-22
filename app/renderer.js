@@ -365,7 +365,7 @@ const detailDefs = {
           </div>
           <canvas id="cpu-curve"></canvas>
         </div>
-        <div class="section-title">逻辑核心${hasPE ? '（P = 性能核 / E = 能效核）' : '（真实频率，非估算）'}</div><div class="tiles">`;
+        <div class="section-title">逻辑核心${hasPE ? '（P = 性能核 / E = 能效核）' : '（真实频率，非估算）'}</div><div class="tiles${d.cpu.cores.length === 4 ? ' c4' : ''}">`;
       d.cpu.cores.forEach((v, i) => {
         const nm = hasPE ? (types[i] || '?') + (types[i] === 'P' ? types.slice(0, i + 1).filter(x => x === 'P').length - 1
           : types.slice(0, i + 1).filter(x => x === 'E').length - 1) : i;
@@ -540,9 +540,9 @@ const detailDefs = {
     }
   },
   net: {
-    build() {
+    build(d) {
       return `
-        <div class="info-grid">
+        <div class="info-grid${d && d.host && d.host.kind === 'remote' ? ' fill' : ''}">
           <div class="info-item"><div class="info-label">总接收 ↓</div><div class="info-value" style="color:#ffd60a" id="net-rx">—</div></div>
           <div class="info-item"><div class="info-label">总发送 ↑</div><div class="info-value" style="color:#ff453a" id="net-tx">—</div></div>
           <div class="info-item"><div class="info-label">主接口</div><div class="info-value" id="net-main">—</div></div>
