@@ -278,6 +278,7 @@ document.getElementById('hf-ok').onclick = async () => {
 // 避免 GPU/电池/功耗卡片闪一下不见，也避免此时点卡片把选择重置成 CPU
 let lastCardIds = ['cpu', 'mem', 'disk', 'net'];
 let sidebarSig = '';
+let sidebarPowerTitle = '';   // 侧栏当前渲染的功耗卡片标题（切主机时若变化需重建）
 function cardsFor(d) {
   if (!d) return lastCardIds.slice();
   const ids = ['cpu'];
@@ -291,7 +292,7 @@ function buildSidebarFor(d, keepCard) {
   const sb = document.getElementById('sidebar');
   sb.innerHTML = '';
   const ids = d ? cardsFor(d) : lastCardIds.slice();
-  if (d) { lastCardIds = ids.slice(); sidebarSig = ids.join(','); }
+  if (d) { lastCardIds = ids.slice(); sidebarSig = ids.join(','); sidebarPowerTitle = cardTitle('power', d); }
   if (!keepCard && !ids.includes(activeCard)) activeCard = 'cpu';
   ids.forEach(id => {
     const c = CARD_DEFS[id];
@@ -301,7 +302,7 @@ function buildSidebarFor(d, keepCard) {
     el.innerHTML = `
       <span class="dot" style="background:${c.color}"></span>
       <div class="card-body">
-        <div class="card-title">${c.title}</div>
+        <div class="card-title">${id === 'power' ? cardTitle(id, d) : c.title}</div>
         <div class="card-sub" id="sub-${id}">正在采样…</div>
       </div>
       <canvas id="spark-${id}"></canvas>`;
@@ -313,7 +314,9 @@ function buildSidebar() { buildSidebarFor(latest); }
 
 function mainIface(d) {
   const list = (d.net && d.net.ifaces) || [];
-  const pref = d.host.kind === 'local' ? ['en0', 'en1'] : ['wlo1', 'wlan0', 'eth0', 'enp1s0', 'tailscale0'];
+  const pref = d.host.kind === 'local' ? ['en0', 'en1']
+    : d.host.kind === 'win' ? ['以太网', 'Ethernet', '以太网 2', 'WLAN', 'Wi-Fi', 'Tailscale']
+    : ['wlo1', 'wlan0', 'eth0', 'enp1s0', 'tailscale0'];
   for (const n of pref) { const f = list.find(i => i.name === n); if (f) return f; }
   return list.slice().sort((a, b) => (b.rx + b.tx) - (a.rx + a.tx))[0] || null;
 }
@@ -334,10 +337,18 @@ function updateSidebar(d) {
     const u = (g.util === null || g.util === undefined) ? '—' : g.util.toFixed(0) + '%';
     setText('sub-gpu', g.style === 'linux'
       ? `${u} · ${g.freq > 0 ? g.freq + ' MHz' : '空闲'}`
-      : `${u} · ${fmtSize(g.memBytes)}`);
+      : g.style === 'win'
+        ? `${u}${g.power !== null && g.power !== undefined ? ' · ' + g.power.toFixed(0) + ' W' : ''}`
+        : `${u} · ${fmtSize(g.memBytes)}`);
   }
   if (d.batt) setText('sub-batt', `${d.batt.percent}%${d.batt.status === 'charging' ? ' · 充电中' : d.batt.status === 'discharging' ? ' · 放电中' : ''}`);
-  if (d.power) setText('sub-power', d.power.ok ? `${d.power.pkg.toFixed(1)} W · ${pkgTemp(d)}℃` : `${pkgTemp(d)}℃ · 功耗不可用`);
+  // v1.2.7：N100 / Win 11 侧栏小字只留功耗数据（温度看详情页），MacBook 保留 CPU 封装温度
+  if (d.power) {
+    const remote = d.host.kind === 'remote' || d.host.kind === 'win';
+    setText('sub-power', d.power.ok
+      ? (remote ? `${d.power.pkg.toFixed(1)} W` : `${d.power.pkg.toFixed(1)} W · ${pkgTemp(d)}℃`)
+      : (remote ? '功耗不可用' : `${pkgTemp(d)}℃ · 功耗不可用`));
+  }
 
   drawSeries(document.getElementById('spark-cpu'), hist.cpu, '#0a84ff');
   drawSeries(document.getElementById('spark-mem'), hist.mem, '#bf5af2', 100);
@@ -351,12 +362,24 @@ function updateSidebar(d) {
 
 // ---------- 详情 ----------
 const titleMap = { cpu: 'CPU', mem: '内存', disk: '磁盘', net: '网络', gpu: 'GPU', batt: '电池', power: '功耗 / 温度' };
+// v1.2.6：N100 / Win 11 的功耗卡片标题简化为「功耗」，MacBook 本机保持「功耗 / 温度」
+// d 参数：buildSidebarFor 切主机重建时传入新主机 payload，避免读到旧的 latest
+function cardTitle(id, d) {
+  const k = ((d || latest) && (d || latest).host || {}).kind;
+  if (id === 'power' && (k === 'remote' || k === 'win')) return '功耗';
+  return titleMap[id];
+}
 
 const detailDefs = {
   cpu: {
     build(d) {
       const types = d.cpu.coreTypes || [];
       const hasPE = types.includes('P') || types.includes('E');
+      // Windows 超线程 CPU：12 逻辑核 = 6 物理核 + 超线程，6 列正好两行（Windows 枚举 0–5 为物理核）
+      const c6 = d.host.kind === 'win' && d.cpu.cores.length === 12;
+      const title = hasPE ? '逻辑核心（P = 性能核 / E = 能效核）'
+        : c6 ? '逻辑核心（上行 0–5 = 物理核 / 下行 6–11 = 超线程）'
+        : '逻辑核心（真实频率，非估算）';
       let html = `
         <div class="panel">
           <div class="panel-head">
@@ -365,7 +388,7 @@ const detailDefs = {
           </div>
           <canvas id="cpu-curve"></canvas>
         </div>
-        <div class="section-title">逻辑核心${hasPE ? '（P = 性能核 / E = 能效核）' : '（真实频率，非估算）'}</div><div class="tiles${d.cpu.cores.length === 4 ? ' c4' : ''}">`;
+        <div class="section-title">${title}</div><div class="tiles${d.cpu.cores.length === 4 ? ' c4' : c6 ? ' c6' : ''}">`;
       d.cpu.cores.forEach((v, i) => {
         const nm = hasPE ? (types[i] || '?') + (types[i] === 'P' ? types.slice(0, i + 1).filter(x => x === 'P').length - 1
           : types.slice(0, i + 1).filter(x => x === 'E').length - 1) : i;
@@ -383,9 +406,9 @@ const detailDefs = {
         <div class="info-grid cols-3">
           <div class="info-item"><div class="info-label">总利用率</div><div class="info-value" id="cpu-total">—</div></div>
           <div class="info-item"><div class="info-label">用户 / 系统</div><div class="info-value" id="cpu-us">—</div></div>
-          <div class="info-item"><div class="info-label">${d.host.kind === 'local' ? '空闲' : 'I/O 等待'}</div><div class="info-value" id="cpu-io">—</div></div>
+          <div class="info-item"><div class="info-label">${d.host.kind === 'local' || d.host.kind === 'win' ? '空闲' : 'I/O 等待'}</div><div class="info-value" id="cpu-io">—</div></div>
           <div class="info-item"><div class="info-label">当前频率</div><div class="info-value" style="font-size:13px" id="cpu-freq">—</div></div>
-          <div class="info-item"><div class="info-label">负载均值 (1/5/15 分钟)</div><div class="info-value" id="cpu-load">—</div></div>
+          <div class="info-item"><div class="info-label">${d.host.kind === 'win' ? '进程数' : '负载均值 (1/5/15 分钟)'}</div><div class="info-value" id="cpu-load">—</div></div>
           <div class="info-item"><div class="info-label">型号</div><div class="info-value" style="font-size:12.5px">${esc(d.cpu.model)}</div></div>
         </div>`;
       return html;
@@ -403,7 +426,8 @@ const detailDefs = {
       });
       setText('cpu-total', d.cpu.total.toFixed(1) + '%');
       setText('cpu-us', `${d.cpu.user.toFixed(1)}% / ${d.cpu.sys.toFixed(1)}%`);
-      setText('cpu-io', d.host.kind === 'local' ? (d.cpu.idle || 0).toFixed(1) + '%' : d.cpu.iowait.toFixed(1) + '%');
+      setText('cpu-io', (d.host.kind === 'local' || d.host.kind === 'win')
+        ? (d.cpu.idle || 0).toFixed(1) + '%' : d.cpu.iowait.toFixed(1) + '%');
       if (d.host.kind === 'local') {
         const fp = d.cpu.freqP !== null && d.cpu.freqP !== undefined
           ? (700 + (d.cpu.freqP / 100) * (4410 - 700)) / 1000 : null;
@@ -414,14 +438,20 @@ const detailDefs = {
         const avgF = d.cpu.freq.length ? d.cpu.freq.reduce((a, b) => a + b, 0) / d.cpu.freq.length / 1000 : 0;
         setHTML('cpu-freq', avgF ? avgF.toFixed(2) + ' GHz <small>最大 ' + (d.cpu.freqMax / 1000).toFixed(2) + ' GHz</small>' : '—');
       }
-      const la = d.cpu.load || [0, 0, 0];
-      setText('cpu-load', `${(la[0] || 0).toFixed(2)} / ${(la[1] || 0).toFixed(2)} / ${(la[2] || 0).toFixed(2)}`);
+      if (d.host.kind === 'win') {
+        setText('cpu-load', d.procs.count + ' 个');   // v1.2.8：Windows 无 loadavg，该格显示进程数
+      } else {
+        const la = d.cpu.load;
+        setText('cpu-load', la ? `${(la[0] || 0).toFixed(2)} / ${(la[1] || 0).toFixed(2)} / ${(la[2] || 0).toFixed(2)}` : '—');
+      }
     },
     meta(d) {
       const types = d.cpu.coreTypes || [];
       const p = types.filter(x => x === 'P').length, e = types.filter(x => x === 'E').length;
       return d.host.kind === 'local'
         ? `${d.cpu.model} · ${d.cpu.count} 核${p ? `（${p}P+${e}E）` : ''} · 频率按利用率估算`
+        : d.host.kind === 'win'
+        ? `${d.cpu.model} · ${d.cpu.count} 核 · WMI 采样（SSH）`
         : `${d.cpu.model} · ${d.cpu.count} 核 · 真实频率（cpufreq）`;
     }
   },
@@ -447,6 +477,11 @@ const detailDefs = {
         ['联动 (wired)', m.wired || 0, '#0a84ff'],
         ['压缩 (compressed)', m.compressed || 0, '#ff9f0a'],
         ['文件缓存 (cached)', m.cached || 0, '#30d158'],
+        ['可用', m.avail || 0, 'rgba(235,240,248,0.3)']
+      ] : m.style === 'win' ? [
+        ['已使用', m.used || 0, '#bf5af2'],
+        ['缓存 (Cached)', m.cached || 0, '#0a84ff'],
+        ['提交内存 (Commit)', m.commit || 0, '#ff9f0a'],
         ['可用', m.avail || 0, 'rgba(235,240,248,0.3)']
       ] : [
         ['已使用（匿名）', m.anon, '#bf5af2'], ['缓存 + 可回收', m.cached, '#0a84ff'],
@@ -586,6 +621,20 @@ const detailDefs = {
         </div>
         <div class="section-title">数据源：/sys/class/drm/card0/gt/gt0（RC6 空闲驻留差分 → 真实利用率，免 sudo）</div>`;
       }
+      // Windows 独显（nvidia-smi）：利用率/功耗/温度/显存一步到位
+      if (d.gpu && d.gpu.style === 'win') {
+        return `
+        <div class="info-grid cols-3">
+          <div class="info-item"><div class="info-label">GPU 利用率</div><div class="info-value" style="color:var(--cyan)" id="gpu-util">—</div></div>
+          <div class="info-item"><div class="info-label">实时功耗</div><div class="info-value" style="color:var(--orange)" id="gpu-power">—</div></div>
+          <div class="info-item"><div class="info-label">功耗上限</div><div class="info-value" id="gpu-plimit">—</div></div>
+          <div class="info-item"><div class="info-label">GPU 温度</div><div class="info-value" id="gpu-temp">—</div></div>
+          <div class="info-item"><div class="info-label">显存</div><div class="info-value" style="font-size:12.5px" id="gpu-mem">—</div></div>
+          <div class="info-item"><div class="info-label">型号</div><div class="info-value" style="font-size:12.5px" id="gpu-name">—</div></div>
+          <div class="info-item"><div class="info-label">驱动版本</div><div class="info-value" style="font-size:12.5px" id="gpu-driver">—</div></div>
+        </div>
+        <div class="section-title">数据源：nvidia-smi（SSH 直采，NVIDIA 显卡专有）</div>`;
+      }
       return `
         <div class="info-grid cols-3">
           <div class="info-item"><div class="info-label">GPU 利用率</div><div class="info-value" style="color:var(--cyan)" id="gpu-util">—</div></div>
@@ -600,6 +649,16 @@ const detailDefs = {
     update(d) {
       const g = d.gpu || {};
       const p = (v) => (v === null || v === undefined) ? '—' : v.toFixed(1) + '%';
+      if (g.style === 'win') {
+        setText('gpu-util', p(g.util));
+        setText('gpu-power', g.power !== null && g.power !== undefined ? g.power.toFixed(1) + ' W' : '—');
+        setText('gpu-plimit', g.powerLimit ? g.powerLimit.toFixed(0) + ' W' : '—');
+        setText('gpu-temp', g.temp !== null && g.temp !== undefined ? g.temp.toFixed(0) + ' ℃' : '—');
+        setText('gpu-mem', (g.memUsed !== null && g.memTotal) ? `${fmtSize(g.memUsed)} / ${fmtSize(g.memTotal)}` : '—');
+        setText('gpu-name', g.name || '—');
+        setText('gpu-driver', g.driver || '—');
+        return;
+      }
       if (g.style === 'linux') {
         setText('gpu-util', p(g.util));
         setText('gpu-freq', g.freq > 0 ? g.freq + ' MHz'
@@ -618,6 +677,11 @@ const detailDefs = {
       setText('gpu-metal', g.metal || '—');
     },
     meta(d) {
+      if (d.gpu && d.gpu.style === 'win') {
+        const g = d.gpu;
+        if (typeof g.util !== 'number') return 'GPU 数据采样中';
+        return `GPU 利用率 ${g.util.toFixed(0)}%${g.power !== null && g.power !== undefined ? ' · ' + g.power.toFixed(1) + ' W' : ''}${g.temp !== null && g.temp !== undefined ? ' · ' + g.temp.toFixed(0) + '℃' : ''}${g.name ? ' · ' + g.name : ''}`;
+      }
       if (d.gpu && d.gpu.style === 'linux') {
         const g = d.gpu;
         if (typeof g.util !== 'number') return 'GPU 数据采样中';
@@ -726,7 +790,20 @@ const detailDefs = {
     }
   },
   power: {
-    build() {
+    build(d) {
+      // Windows：WinRing0 内核驱动读 CPU 封装功耗（AMD SMU）+ nvidia-smi 读 GPU 功耗
+      if (d.power && d.power.style === 'win') {
+        return `
+        <div class="info-grid cols-3">
+          <div class="info-item"><div class="info-label">整机估算功耗</div><div class="info-value" style="color:var(--orange)" id="pw-pkg">—</div></div>
+          <div class="info-item"><div class="info-label">CPU 封装功耗</div><div class="info-value" id="pw-cpu">—</div></div>
+          <div class="info-item"><div class="info-label">CPU 温度（Tctl）</div><div class="info-value" id="pw-cupt">—</div></div>
+          <div class="info-item"><div class="info-label">GPU 实时功耗</div><div class="info-value" id="pw-gpu">—</div></div>
+          <div class="info-item"><div class="info-label">GPU 温度</div><div class="info-value" id="pw-temp">—</div></div>
+          <div class="info-item"><div class="info-label">GPU 功耗上限</div><div class="info-value" id="pw-limit">—</div></div>
+        </div>
+        <div class="section-title">整机估算 = CPU 封装 + GPU 封装（主板 / 硬盘 / 风扇未计入）· 数据源：WinRing0（AMD SMU）+ nvidia-smi</div>`;
+      }
       return `
         <div class="info-grid cols-3">
           <div class="info-item"><div class="info-label">整机封装功耗</div><div class="info-value" style="color:var(--orange)" id="pw-pkg">—</div></div>
@@ -739,6 +816,15 @@ const detailDefs = {
         <div class="section-title">窗口内功耗 / 温度（<span style="color:var(--orange)">橙=功耗</span> / <span style="color:var(--red)">红=温度</span>）</div>`;
     },
     update(d) {
+      if (d.power && d.power.style === 'win') {
+        setText('pw-pkg', d.power.pkg.toFixed(1) + ' W');
+        setText('pw-cpu', d.power.cpu !== null ? d.power.cpu.toFixed(1) + ' W' : '—');
+        setText('pw-cupt', d.power.cpuTemp !== null ? d.power.cpuTemp.toFixed(1) + ' ℃' : '—');
+        setText('pw-gpu', d.power.gpu !== null ? d.power.gpu.toFixed(1) + ' W' : '—');
+        setText('pw-temp', d.power.gpuTemp !== null ? d.power.gpuTemp.toFixed(0) + ' ℃' : '—');
+        setText('pw-limit', d.power.limit ? d.power.limit.toFixed(0) + ' W' : '—');
+        return;
+      }
       setText('pw-pkg', d.power.ok ? d.power.pkg.toFixed(2) + ' W' : '不可用');
       setText('pw-cores', d.power.ok ? d.power.cores.toFixed(2) + ' W' : '—');
       const t = d.power.temp || {};
@@ -747,7 +833,12 @@ const detailDefs = {
       const wifiKey = Object.keys(t).find(k => k.startsWith('iwlwifi'));
       setText('pw-wifi', wifiKey ? t[wifiKey].toFixed(1) + ' ℃' : '—');
     },
-    meta(d) { return d.power.ok ? `RAPL 实时功耗 · ${d.power.pkg.toFixed(1)} W` : 'RAPL 不可读（需 root 运行 agent）'; }
+    meta(d) {
+      if (d.power && d.power.style === 'win') {
+        return `整机估算 ${d.power.pkg.toFixed(1)} W（CPU ${d.power.cpu !== null ? d.power.cpu.toFixed(0) : '—'} + GPU ${d.power.gpu !== null ? d.power.gpu.toFixed(0) : '—'}）`;
+      }
+      return d.power.ok ? `RAPL 实时功耗 · ${d.power.pkg.toFixed(1)} W` : 'RAPL 不可读（需 root 运行 agent）';
+    }
   }
 };
 
@@ -764,7 +855,7 @@ function tickDetail(force) {
     catch (e) { console.error('detail.build', e); return; }
   }
   try { detailDefs[activeCard].update(latest); } catch (e) { console.error('detail.update', e); }
-  setText('detail-title', titleMap[activeCard]);
+  setText('detail-title', cardTitle(activeCard));
   try {
     const big = document.getElementById('bigchart');
     if (activeCard === 'net') {
@@ -981,7 +1072,7 @@ window.bridge.onStats((d) => {
     buildSidebarFor(d);
     document.getElementById('poll-ctl').classList.toggle('disabled', d.host.kind === 'local');
     renderHostSeg();         // 同步顶部主机 chips（含主进程自动切换的情形，保证高亮与实际一致）
-  } else if (cardsFor(d).join(',') !== sidebarSig) {
+  } else if (cardsFor(d).join(',') !== sidebarSig || cardTitle('power', d) !== sidebarPowerTitle) {
     // 卡片集合变了（例如远程首帧之后才拿到核显 GPU / 本机电池状态变化）也要重建侧栏，
     // 否则新出现的卡片永远不显示
     bodyBuilt = false; builtKey = '';
@@ -1008,17 +1099,22 @@ window.bridge.onStats((d) => {
 
   // 顶栏主机信息
   document.getElementById('osinfo').innerHTML =
-    `${esc(d.sys.hostname || d.host.name)} · ${esc(d.sys.os || (d.host.kind === 'local' ? 'macOS' : 'Linux'))} · ${esc(d.cpu.model || '')}`;
+    `${esc(d.sys.hostname || d.host.name)} · ${esc(d.sys.os || (d.host.kind === 'local' ? 'macOS' : d.host.kind === 'win' ? 'Windows' : 'Linux'))} · ${esc(d.cpu.model || '')}`;
   // 容器页：仅远程 Linux 主机可用
+  const noDocker = d.host.kind === 'local' || d.host.kind === 'win';
   const dockerTab = document.getElementById('tab-docker');
-  dockerTab.style.display = d.host.kind === 'local' ? 'none' : '';
-  if (d.host.kind === 'local' && currentView === 'docker') switchView('perf');
+  dockerTab.style.display = noDocker ? 'none' : '';
+  if (noDocker && currentView === 'docker') switchView('perf');
 
   // 状态栏
   const dot = document.getElementById('sb-dot');
   dot.className = 'sb-dot' + (d.link.ok ? '' : ' bad');
   if (d.host.kind === 'local') {
     setText('sb-left', `本机直采 · ${d.host.name} · 每 2 秒刷新 · ${d.procs.count || ''}${d.procs.count ? ' 个进程' : ''}`);
+  } else if (d.host.kind === 'win') {
+    setText('sb-left', d.link.ok
+      ? `已连接 ${d.host.name}（SSH · ${d.link.host}） · 采样 ${d.link.rtt} ms · 轮询 ${(d.link.interval / 1000).toFixed(0)} 秒 · 本次会话已用流量 ${fmtTraffic(d.link.bytes)}`
+      : `连接中断，正在重试…（${d.host.name} · SSH）`);
   } else {
     setText('sb-left', d.link.ok
       ? `已连接 ${d.link.host} · 延迟 ${d.link.rtt} ms · 轮询 ${(d.link.interval / 1000).toFixed(0)} 秒 · 本次会话已用流量 ${fmtTraffic(d.link.bytes)}（${d.link.polls} 次请求）`

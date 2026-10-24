@@ -1,9 +1,10 @@
-// 任务管理器-统一版：一个 App 同时管理「本机 Mac」与「远程 Linux 主机（N100 等）」
+// 任务管理器-统一版：一个 App 同时管理「本机 Mac」与「远程主机（N100 / Windows 11 等）」
 // 数据源抽象：
 //   local  —— 本机直采（Swift 助手 + vm_stat/iostat/netstat/ioreg/nettop）
 //   remote —— 远程 n100_agent（HTTP + gzip，按需采集，省流量）
+//   win    —— 远程 Windows（SSH + PowerShell WMI，免装 agent，目标机只需开启 OpenSSH Server）
 const { app, BrowserWindow, ipcMain, dialog, nativeTheme } = require('electron');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 const http = require('http');
 const zlib = require('zlib');
 const fs = require('fs');
@@ -25,8 +26,9 @@ if (!app.requestSingleInstanceLock()) {
 // ---------------------------------------------------------------- 配置
 const DEFAULT_CFG = {
   hosts: [
-    { id: 'local', name: '本机 Mac', kind: 'local' },
-    { id: 'n100', name: 'N100', kind: 'remote', host: '100.111.73.34', port: 9100 }
+    { id: 'local', name: 'MacBook', kind: 'local' },
+    { id: 'n100', name: 'N100', kind: 'remote', host: '100.111.73.34', port: 9100 },
+    { id: 'win11', name: 'Win 11', kind: 'win', host: 'win11' }
   ],
   activeHost: 'local',
   intervalMs: 5000,   // 远程轮询间隔（省流量）
@@ -40,10 +42,20 @@ function loadCfg() {
     // 本机条目始终存在且不可删除
     if (!Array.isArray(out.hosts) || !out.hosts.length) out.hosts = DEFAULT_CFG.hosts.slice();
     if (!out.hosts.some(h => h.id === 'local')) out.hosts.unshift(DEFAULT_CFG.hosts[0]);
+    // v1.1.0 起内置 Windows 11（SSH）：老配置文件里没有时自动补上（仅补一次，不覆盖用户已删的状态）
+    if (cfgHadWin === null) cfgHadWin = Array.isArray(out.hosts) && out.hosts.some(h => h.id === 'win11');
+    if (!cfgHadWin && !out.hosts.some(h => h.id === 'win11')) out.hosts.push(DEFAULT_CFG.hosts[2]);
+    // v1.2.0：本机显示名从「本机 Mac」改为「MacBook」（老配置文件迁移）
+    const lh = out.hosts.find(h => h.id === 'local');
+    if (lh && lh.name === '本机 Mac') lh.name = 'MacBook';
+    // v1.2.1：Windows 11 显示名改为「Win 11」（仅迁移内置默认名，不覆盖用户自定义）
+    const wh = out.hosts.find(h => h.id === 'win11');
+    if (wh && wh.name === 'Windows 11') wh.name = 'Win 11';
     return out;
   } catch (e) { return JSON.parse(JSON.stringify(DEFAULT_CFG)); }
 }
 function saveCfg(c) { try { fs.writeFileSync(CFG_PATH, JSON.stringify(c, null, 2)); } catch (e) { } }
+let cfgHadWin = null;   // 首次 loadCfg 时老配置里是否已有 win11（null=未判定）
 let cfg = loadCfg();
 let currentHost = cfg.hosts.find(h => h.id === cfg.activeHost) || cfg.hosts[0];
 
@@ -464,7 +476,7 @@ function buildLocalPayload() {
   });
   const uptime = Math.max(0, Math.floor(Date.now() / 1000) - (st.bootSec || 0));
   return {
-    host: { id: 'local', name: '本机 Mac', kind: 'local' },
+    host: { id: 'local', name: 'MacBook', kind: 'local' },
     ts: Date.now(),
     link: { ok: true, rtt: 0, bytes: 0, polls: polls, interval: 2000, host: st.hostname || 'localhost', mode: '本机直采' },
     cpu: {
@@ -614,6 +626,211 @@ function buildRemotePayload() {
   };
 }
 
+// ================================================================ Windows 采集（SSH + PowerShell WMI，免装 agent）
+// 原理：把 PowerShell 采样脚本以 UTF-16LE base64（-EncodedCommand）发给目标机，
+// 脚本一次性拉取 CPU/内存/磁盘/网络/卷/进程（WMI FormattedData 自带速率口径，免差分），
+// 只有进程 CPU% 需要在本侧按 TotalProcessorTime 差分计算。
+// 输出用 <<<TMU>>> 标记定位 JSON，规避 PowerShell 的 CLIXML 噪音。
+const WIN_PS = `$ErrorActionPreference='SilentlyContinue'; $ProgressPreference='SilentlyContinue'
+[Console]::OutputEncoding=[Text.Encoding]::UTF8
+$os=gcim Win32_OperatingSystem; $cs=gcim Win32_ComputerSystem
+gcim Win32_PerfFormattedData_PerfOS_Processor|Out-Null
+Start-Sleep -Milliseconds 500
+$pf=gcim Win32_PerfFormattedData_PerfOS_Processor
+$pm=gcim Win32_PerfFormattedData_PerfOS_Memory
+$pd=gcim Win32_PerfFormattedData_PerfDisk_PhysicalDisk
+$pn=gcim Win32_PerfFormattedData_Tcpip_NetworkInterface
+$na=Get-NetAdapterStatistics
+$ld=gcim Win32_LogicalDisk -Filter "DriveType=3"
+$pfu=gcim Win32_PageFileUsage
+$t=$pf|?{$_.Name -eq '_Total'}
+$cl=@($pf|?{$_.Name -ne '_Total'}|sort{[int]$_.Name})
+$dt=$pd|?{$_.Name -eq '_Total'}|select -First 1
+$pr=@{};$pw=@{};gcim Win32_PerfFormattedData_PerfProc_Process|?{$_.Name -ne '_Total'}|%{$b=($_.Name -split '#')[0];if(!$pr.Contains($b)){$pr[$b]=0;$pw[$b]=0};$pr[$b]+=[long]$_.IOReadBytesPersec;$pw[$b]+=[long]$_.IOWriteBytesPersec}
+$procs=@(Get-Process|%{$c=0.0;try{$c=[double]$_.TotalProcessorTime.TotalSeconds}catch{};[pscustomobject]@{pid=$_.Id;name=$_.ProcessName;rss=[long]$_.WorkingSet64;cpuSec=[math]::Round($c,3);ioR=$pr[$_.ProcessName];ioW=$pw[$_.ProcessName]}})
+$disks=@($pd|?{$_.Name -ne '_Total'}|%{[pscustomobject]@{name=$_.Name;r=[long]$_.DiskReadBytesPersec;w=[long]$_.DiskWriteBytesPersec}})
+$volumes=@($ld|%{[pscustomobject]@{mount=$_.DeviceID;total=[long]$_.Size;free=[long]$_.FreeSpace}})
+$net=@($pn|%{$n=$_.Name;$cn=$n -replace '\\[R\\]','(R)';$a=@($na|?{$_.InterfaceDescription -eq $cn -or $_.Name -eq $n})[0];[pscustomobject]@{name=$n;rx=[long]$_.BytesReceivedPersec;tx=[long]$_.BytesSentPersec;rxTotal=$(if($a){[long]$a.ReceivedBytes}else{0});txTotal=$(if($a){[long]$a.SentBytes}else{0})}})
+$swT=@($pfu|measure AllocatedBaseSize -Sum).Sum; $swU=@($pfu|measure CurrentUsage -Sum).Sum
+$up=[long]([DateTimeOffset]::Now.Subtract($os.LastBootUpTime).TotalSeconds)
+$o=[pscustomobject]@{sys=[pscustomobject]@{hostname=$cs.DNSHostname;os=($os.Caption+' '+$os.Version).Trim();model=($cs.Manufacturer+' '+$cs.Model).Trim();cores=$cs.NumberOfLogicalProcessors};uptime=$up;cpu_total=[int]$t.PercentProcessorTime;cpu_user=[int]$t.PercentUserTime;cpu_sys=[int]$t.PercentPrivilegedTime;cpu_idle=[int]$t.PercentIdleTime;cores=$cl|%{[int]$_.PercentProcessorTime};mem=[pscustomobject]@{total=[long]($os.TotalVisibleMemorySize*1KB);avail=[long]$pm.AvailableBytes;cached=[long]($pm.StandbyCacheCoreBytes+$pm.StandbyCacheNormalPriorityBytes+$pm.StandbyCacheReserveBytes);commit=[long]$pm.CommittedBytes};swap=[pscustomobject]@{total=[long]($swT*1MB);used=[long]($swU*1MB)};disk=$disks;disk_total_r=[long]$dt.DiskReadBytesPersec;disk_total_w=[long]$dt.DiskWriteBytesPersec;tps=[int]$dt.DiskTransfersPersec;volumes=$volumes;net=$net;procs=$procs}
+Write-Output '<<<TMU>>>'
+ConvertTo-Json $o -Compress -Depth 4`;
+
+// GPU 采集走独立短脚本（与主脚本并行、错峰发起）：nvidia-smi 一次拿到
+// 利用率/显存/功耗/功耗上限/温度/驱动版本；没有 NVIDIA 显卡时输出为空 → gpu=null。
+// 不并进主脚本的原因：EncodedCommand 走 ssh 命令行，总长受 Windows 8191 字符限制。
+const WIN_GPU = `$ErrorActionPreference='SilentlyContinue'
+function cv([string]$x){$v=0.0;if([double]::TryParse($x,[ref]$v)){$v}else{-1}}
+$gl=@(nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total,power.draw,power.limit,temperature.gpu --format=csv,noheader,nounits 2>$null)
+$gpu=$null
+if($gl -and $gl[0] -notmatch 'failed|error'){$gp=$gl[0] -split ',';$vc=@(gcim Win32_VideoController);$nv=@($vc|?{$_.Name -match 'NVIDIA'})[0];$dv=$(if($nv){$nv.DriverVersion}else{$vc[0].DriverVersion});if($gp.Count -ge 7){$gpu=[pscustomobject]@{name=$gp[0];util=(cv $gp[1]);memUsed=(cv $gp[2]);memTotal=(cv $gp[3]);power=(cv $gp[4]);powerLimit=(cv $gp[5]);temp=(cv $gp[6]);driver=$dv}}}
+Write-Output '<<<TMU>>>'
+ConvertTo-Json $gpu -Compress`;
+
+let wSnap = null, wGpu = null, wSensors = null, wOk = false, wRtt = 0, wFail = 0, wBytes = 0;
+let wPrevProcs = null, wPrevTime = 0;   // 进程 CPU% 差分基准（TotalProcessorTime 秒）
+
+function sshWin(alias, script, timeout = 20000) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const enc = Buffer.from(script, 'utf16le').toString('base64');
+    const args = [
+      '-o', 'ControlMaster=auto', '-o', 'ControlPath=/tmp/tmu-win-' + alias + '.sock',
+      '-o', 'ControlPersist=300', '-o', 'ConnectTimeout=10', '-o', 'BatchMode=yes',
+      alias, 'powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand', enc
+    ];
+    let out = '', done = false;
+    const child = spawn('ssh', args);
+    const finish = (ok) => {
+      if (done) return; done = true;
+      clearTimeout(killT);
+      resolve({ ok, out, ms: Date.now() - t0 });
+    };
+    const killT = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) { } finish(false); }, timeout);
+    child.stdout.on('data', d => { out += d.toString('utf8'); wBytes += d.length; });
+    child.on('close', (code) => finish(code === 0 || out.includes('<<<TMU>>>')));
+    child.on('error', () => finish(false));
+    child.stdin.end('');
+  });
+}
+
+function parseWinJson(out) {
+  const i = out.indexOf('<<<TMU>>>');
+  if (i < 0) return null;
+  const j = out.indexOf('{', i);
+  if (j < 0) return null;
+  try { return JSON.parse(out.slice(j)); } catch (e) { return null; }
+}
+
+async function pollWindows() {
+  const alias = currentHost.host;
+  // 主脚本先发，GPU / 传感器服务错峰后发（避开 ControlMaster 建立时的并发竞争）
+  const rMain = sshWin(alias, WIN_PS);
+  const rGpu = (async () => {
+    await new Promise(r2 => setTimeout(r2, 500));
+    return sshWin(alias, WIN_GPU);
+  })();
+  // v1.2.3：LibreHardwareMonitor 传感器服务（Win11 上常驻 HttpListener :8086，
+  // WinRing0 内核驱动读 AMD SMU / MSR），SSH 里 curl 本机端口即可，毫秒级返回
+  const rSns = (async () => {
+    await new Promise(r2 => setTimeout(r2, 900));
+    return sshWin(alias, 'curl.exe -s --max-time 10 http://127.0.0.1:8086/', 15000);
+  })();
+  const [r, rg, rs] = await Promise.all([rMain, rGpu, rSns]);
+  if (!r.ok) { wFail++; if (wFail >= 2) wOk = false; return; }
+  const snap = parseWinJson(r.out);
+  if (!snap || !snap.sys) { wFail++; if (wFail >= 2) wOk = false; return; }
+  wFail = 0; wOk = true; wRtt = r.ms; wSnap = snap;
+  const g = rg.ok ? parseWinJson(rg.out) : null;   // 无 NVIDIA 显卡时为 null
+  if (g) wGpu = g;
+  // 传感器服务未运行（脚本损坏/未部署）时保持上次值，不影响其余页面
+  if (rs.ok) {
+    try {
+      const arr = JSON.parse(rs.out);
+      if (Array.isArray(arr) && arr.length) wSensors = arr;
+    } catch (e) { /* 传感器服务离线 */ }
+  }
+}
+
+function buildWinPayload() {
+  const s = wSnap || {};
+  const sys = s.sys || {};
+  const m = s.mem || {};
+  const total = m.total || 1, avail = m.avail || 0, used = Math.max(0, total - avail);
+  const procs = s.procs || [];
+  const now = Date.now();
+  const iv = wPrevTime ? Math.max(0.5, (now - wPrevTime) / 1000) : 2;
+  const ncpu = sys.cores || (s.cores || []).length || 1;
+  const list = procs.map(p => {
+    const prev = wPrevProcs ? wPrevProcs[p.pid] : null;
+    let cpu = prev ? Math.max(0, (p.cpuSec - prev) / iv * 100) : 0;
+    cpu = Math.min(100, cpu / ncpu);          // 换算为占整机容量百分比（与 N100 口径一致）
+    return { pid: p.pid, name: p.name, cpu, rss: p.rss, dr: p.ioR || 0, dw: p.ioW || 0, rx: 0, tx: 0, energy: 0 };
+  });
+  list.sort((a, b) => b.cpu - a.cpu);
+  const prevMap = {};
+  procs.forEach(p => { prevMap[p.pid] = p.cpuSec; });
+  wPrevProcs = prevMap; wPrevTime = now;
+  return {
+    host: { id: currentHost.id, name: currentHost.name, kind: 'win' },
+    ts: Date.now(),
+    link: {
+      ok: wOk, rtt: wRtt, bytes: wBytes, polls: polls, interval: cfg.intervalMs,
+      host: currentHost.host, mode: 'SSH + PowerShell'
+    },
+    // v1.2.5：CPU 频率接通——LHM 传感器服务（WinRing0 读 AMD SMU）给逐物理核有效时钟，
+    // 6 物理核映射到 12 逻辑核：0–5 = 物理核 1–6，6–11 = 对应超线程兄弟（同频）
+    cpu: (() => {
+      const clocks = [];
+      for (let i = 1; i <= 32 && clocks.length < 8; i++) {
+        const c = (wSensors || []).find(x => x.hw === 'Cpu' && x.type === 'Clock' && x.name === 'Core #' + i);
+        if (c && typeof c.val === 'number' && c.val > 100) clocks.push(c.val);
+      }
+      const nLog = sys.cores || (s.cores || []).length;
+      const freq = clocks.length
+        ? Array.from({ length: nLog || clocks.length }, (_, i) => clocks[i % clocks.length])
+        : [];
+      return {
+        cores: s.cores || [], count: nLog,
+        total: s.cpu_total || 0, user: s.cpu_user || 0, sys: s.cpu_sys || 0, idle: s.cpu_idle || 0, iowait: 0,
+        freq, freqMax: clocks.length ? Math.max(...clocks) : 0, coreTypes: [], pUsage: null, eUsage: null, freqP: null, freqE: null,
+        load: null, model: sys.model || ''
+      };
+    })(),
+    mem: {
+      total, avail, used, percent: used / total * 100,
+      cached: m.cached || 0, commit: m.commit || 0, buffers: 0, shmem: 0, anon: 0,
+      swapTotal: (s.swap && s.swap.total) || 0, swapUsed: (s.swap && s.swap.used) || 0,
+      style: 'win'
+    },
+    disk: {
+      devices: s.disk || [], totalR: s.disk_total_r || 0, totalW: s.disk_total_w || 0, tps: s.tps,
+      // WMI 只有 total/free：换算出 used/avail，渲染端卷表才能显示「已用 / 总量」
+      volumes: (s.volumes || []).map(v => ({ mount: v.mount, total: v.total, free: v.free, used: Math.max(0, v.total - v.free), avail: v.free }))
+    },
+    net: { ifaces: s.net || [] },
+    // v1.2.0：Windows GPU（nvidia-smi，MB→字节换算；util=-1 视为不可用）
+    gpu: (wGpu && typeof wGpu.util === 'number' && wGpu.util >= 0) ? {
+      style: 'win',
+      util: wGpu.util,
+      name: wGpu.name || '',
+      driver: wGpu.driver || '',
+      memUsed: wGpu.memUsed >= 0 ? wGpu.memUsed * 1048576 : null,
+      memTotal: wGpu.memTotal >= 0 ? wGpu.memTotal * 1048576 : null,
+      power: wGpu.power >= 0 ? wGpu.power : null,
+      powerLimit: wGpu.powerLimit > 0 ? wGpu.powerLimit : null,
+      temp: wGpu.temp >= 0 ? wGpu.temp : null
+    } : null,
+    // v1.2.3：功耗/温度卡片升级为「整机口径」——WinRing0 内核驱动读 CPU 封装功耗（AMD SMU），
+    // GPU 功耗沿用 nvidia-smi；整机估算 = CPU 封装 + GPU 封装（主板/硬盘/风扇未计入）
+    power: (() => {
+      const pick = (hw, type, re) => {
+        const s = (wSensors || []).find(x => x.hw === hw && x.type === type && re.test(x.name || ''));
+        return s && typeof s.val === 'number' ? s.val : null;
+      };
+      const cpuP = pick('Cpu', 'Power', /^Package$/i);
+      const cpuT = pick('Cpu', 'Temperature', /Tctl|Tdie|^Package/i);
+      const gpuS = pick('GpuNvidia', 'Power', /Package/i);
+      const gpuT = pick('GpuNvidia', 'Temperature', /^GPU Core$/i);
+      const gpuP = (wGpu && typeof wGpu.power === 'number' && wGpu.power >= 0) ? wGpu.power : gpuS;
+      const limit = (wGpu && wGpu.powerLimit > 0) ? wGpu.powerLimit : null;
+      const gpuTemp = (wGpu && wGpu.temp >= 0) ? wGpu.temp : gpuT;
+      if (cpuP === null && gpuP === null) return null;
+      return {
+        style: 'win',
+        pkg: (cpuP || 0) + (gpuP || 0),           // 整机估算，喂侧栏摘要与曲线
+        cpu: cpuP, cpuTemp: cpuT, gpu: gpuP, gpuTemp,
+        limit, ok: true
+      };
+    })(),
+    batt: null,
+    sys: { hostname: sys.hostname || '', os: sys.os || 'Windows', kernel: '', uptime: s.uptime || 0, model: sys.model || '' },
+    procs: { count: procs.length, list: list.slice(0, 300) },
+    docker: null
+  };
+}
+
 // ================================================================ 轮询调度
 // 本机常驻采样：无论当前在看哪台主机，每 2 秒都采一拍（纯本地、零流量）。
 // 这样切去 N100 一段时间再切回来，本机曲线是连续的，不会出现「看 N100 期间」的断档。
@@ -641,7 +858,7 @@ let timer = null;
 let polling = false;
 let pendingPoll = false;   // 采集进行中又被请求（切主机的立即刷新）：等本次结束后补采一次
 async function poll() {
-  if (currentHost.kind !== 'remote') return;   // 本机由 sampleLocal 常驻驱动，不走这里
+  if (currentHost.kind === 'local') return;   // 本机由 sampleLocal 常驻驱动，不走这里
   // 重入保护：机器高负载时单次采集可能超过轮询间隔，
   // 否则定时器会叠加出多路并发采集，既让差分基准互相覆盖又白吃 CPU
   if (polling) { pendingPoll = true; return; }
@@ -650,10 +867,10 @@ async function poll() {
   polling = true;
   try {
     polls++;
-    await pollRemote();
+    if (host.kind === 'win') await pollWindows(); else await pollRemote();
     // 采集期间用户切换了主机：丢弃这份旧主机的数据，避免张冠李戴
     if (host !== currentHost) return;
-    win.webContents.send('stats', buildRemotePayload());
+    win.webContents.send('stats', host.kind === 'win' ? buildWinPayload() : buildRemotePayload());
   } catch (e) { console.error('poll error', e); }
   finally {
     polling = false;
@@ -665,7 +882,7 @@ async function poll() {
 }
 function schedule() {
   if (timer) { clearInterval(timer); timer = null; }
-  if (currentHost.kind === 'remote') timer = setInterval(poll, cfg.intervalMs);
+  if (currentHost.kind !== 'local') timer = setInterval(poll, cfg.intervalMs);
 }
 
 // ================================================================ 窗口
@@ -694,7 +911,7 @@ function createWindow() {
   });
 
   sampleLocal();                                        // 本机常驻采样，永远在跑
-  if (currentHost.kind === 'remote') poll();            // 远程只在激活时轮询
+  if (currentHost.kind !== 'local') poll();             // 远程只在激活时轮询
   schedule();
 }
 
@@ -722,9 +939,8 @@ app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) creat
 ipcMain.on('set-view', (e, v) => {
   wantProcs = (v === 'procs');
   wantDocker = (v === 'docker');
-  if ((wantProcs || wantDocker) && currentHost.kind === 'remote') poll();
-});
-ipcMain.on('set-interval', (e, ms) => {
+  if ((wantProcs || wantDocker) && currentHost.kind !== 'local') poll();
+});ipcMain.on('set-interval', (e, ms) => {
   ms = parseInt(ms, 10);
   if ([2000, 5000, 10000].includes(ms)) { cfg.intervalMs = ms; saveCfg(cfg); schedule(); }
 });
@@ -736,6 +952,7 @@ ipcMain.handle('set-host', (e, id) => {
   // 切换主机：重置远程缓存与流量计数，立即采一次
   rSnap = null; rProcs = { list: [], count: 0 }; rDocker = { containers: [] };
   rBytes = 0; rRtt = 0; rOk = false; rFail = 0; rLastProcFetch = 0; rLastDockerFetch = 0;
+  wSnap = null; wGpu = null; wSensors = null; wPrevProcs = null; wPrevTime = 0; wBytes = 0; wRtt = 0; wOk = false; wFail = 0;
   // 同时重置本机侧差分基准：离开本机期间旧快照已过期，否则切回来首帧速率/进程 CPU 会失真
   // （lastCoreTicks 例外：它是累计 tick，算的是区间占比与时间无关，保留可让切回后首帧就有真实 CPU 值，否则每核图块会空 2 秒）
   lastIfaces = null; lastNetTime = 0; lastProcRaw = null; lastProcsTime = 0;
@@ -766,6 +983,7 @@ ipcMain.handle('remove-host', (e, id) => {
     // 与 set-host 一致：清缓存 + 重排定时器，否则切回本机后仍按远程档位（如 10 秒）刷新
     rSnap = null; rProcs = { list: [], count: 0 }; rDocker = { containers: [] };
     rBytes = 0; rRtt = 0; rOk = false; rFail = 0; rLastProcFetch = 0; rLastDockerFetch = 0;
+    wSnap = null; wGpu = null; wSensors = null; wPrevProcs = null; wPrevTime = 0; wBytes = 0; wRtt = 0; wOk = false; wFail = 0;
     lastIfaces = null; lastNetTime = 0; lastProcRaw = null; lastProcsTime = 0;
     if (currentHost.kind === 'local') lRefreshUI = true;
     saveCfg(cfg);
@@ -781,17 +999,27 @@ ipcMain.handle('kill-process', async (e, rawPid) => {
   // 白名单校验：只接受正整数 pid，既防误杀（0/负数=进程组/伪行）也防命令注入
   if (!Number.isInteger(pid) || pid <= 1) return '无效的进程号';
   const isLocal = currentHost.kind === 'local';
-  const where = isLocal ? '本机 Mac' : `${currentHost.name}（${currentHost.host}）`;
+  const isWin = currentHost.kind === 'win';
+  const where = isLocal ? 'MacBook' : `${currentHost.name}（${currentHost.host}）`;
   // 远程也必须确认：远程结束进程之前没有任何提示，容易误杀生产容器里的进程
   const r = await dialog.showMessageBox(win, {
     type: 'warning', buttons: ['结束进程', '取消'], defaultId: 0, cancelId: 1,
     message: `确定要结束 ${where} 上的进程 ${pid} 吗？`,
-    detail: isLocal ? '将发送 SIGKILL，未保存的数据可能会丢失。' : '将向远程 agent 发送 SIGTERM，未保存的数据可能会丢失。'
+    detail: isLocal ? '将发送 SIGKILL，未保存的数据可能会丢失。'
+      : isWin ? '将在远程 Windows 上执行 taskkill /F，未保存的数据可能会丢失。'
+      : '将向远程 agent 发送 SIGTERM，未保存的数据可能会丢失。'
   });
   if (r.response !== 0) return '已取消';
   if (isLocal) {
     return new Promise((resolve) => {
       exec(`kill -9 ${pid}`, (err) => resolve(err ? '失败：' + err.message : `已结束进程 ${pid}`));
+    });
+  }
+  if (isWin) {
+    // taskkill 的中文输出是 GBK，不解析文本，只按退出码判定
+    return new Promise((resolve) => {
+      exec(`ssh -o BatchMode=yes -o ConnectTimeout=10 ${currentHost.host} taskkill /F /PID ${pid}`,
+        { timeout: 15000 }, (err) => resolve(err ? `远程结束失败（PID ${pid}）` : `已结束远程进程 ${pid}`));
     });
   }
   const res = await postJSON('/api/kill', { pid, sig: 'TERM' });
