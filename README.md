@@ -1,14 +1,14 @@
 # 任务管理器-统一版
 
-一个 macOS App，同时监控**本机 Mac** 与**远程 Linux 主机**（N100 等）——整合自 [mac-task-manager](https://github.com/zsan189312-sys/mac-task-manager)（本机版）与 [mac-task-manager-n100](https://github.com/zsan189312-sys/mac-task-manager-n100)（远程版），两个原项目保持独立可用。
+一个 macOS App，同时监控**本机 Mac、远程 Linux（N100 等）、Windows 11**——整合自 [mac-task-manager](https://github.com/zsan189312-sys/mac-task-manager)（本机版）与 [mac-task-manager-n100](https://github.com/zsan189312-sys/mac-task-manager-n100)（远程版），两个原项目保持独立可用。
 
 ## 下载（免编译）
 
-👉 [Releases 页 → v1.0.1](https://github.com/zsan189312-sys/mac-task-manager-unified/releases/tag/v1.0.1)
+👉 [Releases 页 → v2.2.3](https://github.com/zsan189312-sys/mac-task-manager-unified/releases/tag/v2.2.3)
 
-下载 `TaskManager-Unified-v1.0.1-macOS-arm64.zip`（103 MB，Apple Silicon / M 系列），解压后把「任务管理器-统一版.app」拖进「应用程序」，**首次打开需右键 → 打开**（未做 Apple 公证，右键打开一次后即可正常双击）。
+下载 `TaskManager-Unified-v2.2.3-macOS-arm64.zip`（约 100 MiB，Apple Silicon / M 系列），解压后把「任务管理器-统一版.app」拖进「应用程序」，**首次打开需右键 → 打开**（未做 Apple 公证，右键打开一次后即可正常双击）。
 
-SHA256：`a4f33cce1a316b3e425840512b42fbdb79087c11184ceff4d85814ff437ae844`
+各版本 ZIP 的 SHA256 见对应 Release 说明。
 
 ## 预览
 
@@ -20,16 +20,16 @@ SHA256：`a4f33cce1a316b3e425840512b42fbdb79087c11184ceff4d85814ff437ae844`
 
 ## 特性
 
-**双数据源，一键切换**（顶栏主机切换器，支持添加/移除多台远程主机）：
+**三类数据源，一键切换**（顶栏主机切换器，支持添加/移除多台远程主机）：
 
-| | 本机 Mac | 远程 Linux（N100 等） |
-|---|---|---|
-| 采集方式 | Swift 助手 + 系统命令直采 | 常驻 agent（HTTP + gzip） |
-| 刷新 | 固定 2 秒 | 2s / 5s / 10s 可调（省流量） |
-| CPU | 每核占用 + P/E 核分组 + 估算频率 | 每核占用 + 真实频率（cpufreq） |
-| 独有面板 | GPU（IOAccelerator）、电池（电压/电流/功率/健康度） | RAPL 真实功耗、温度、Docker 容器 |
+| | 本机 Mac | 远程 Linux（N100 等） | Windows 11 |
+|---|---|---|---|
+| 采集方式 | Swift 助手 + 系统命令直采 | agent（HTTP + gzip） | SSH + PowerShell WMI，无 TMU agent |
+| 刷新 | 固定 2 秒 | 2s / 5s / 10s 可调 | 同左；实际更新受单轮采集耗时限制 |
+| CPU | 每核占用 + P/E 核分组 + 估算频率 | 每核占用 + cpufreq | 逐逻辑核动态 perf 频率，优先有效 LHM Clock |
+| 独有面板 | GPU（IOAccelerator）、电池 | RAPL 功耗、温度、Docker | NVIDIA GPU、LHM 可用分项、文件浏览/上传/下载 |
 
-**进程页**（两台主机统一七列）：CPU（占整机 %）、内存、磁盘读/写、网速 ↓/↑、能耗瓦数、远程/本地结束进程。macOS 侧已适配 macOS 27 的坑：KERN_PROC_ALL 全量枚举 + darwinbg/nice 线程 CPU 归属修复（kernel_task 与受保护系统进程聚合补齐）。
+**进程页**（统一七列）：CPU（占整机 %）、内存、磁盘读/写、网速 ↓/↑、能耗瓦数、远程/本地结束进程。macOS 侧已适配 macOS 27 的坑：KERN_PROC_ALL 全量枚举 + darwinbg/nice 线程 CPU 归属修复（kernel_task 与受保护系统进程聚合补齐）。
 
 ![进程页](docs/screenshots/processes.png)
 
@@ -39,10 +39,26 @@ SHA256：`a4f33cce1a316b3e425840512b42fbdb79087c11184ceff4d85814ff437ae844`
 
 **省流量设计**：快照 gzip 后约 1.8 KB/次；进程表与容器数据仅在对应页打开时采集；状态栏实时显示延迟与本次会话流量。5 秒轮询挂机 24 小时约 30 MB。
 
+## Windows 与断线恢复
+
+Windows 使用现有 SSH 别名 `win11`，SFTP 盘符绝对路径为 `/C:/...`。动态 CPU 频率每轮读取 PercentProcessorPerformance × 标称 MHz / 100；GPU 用 nvidia-smi，温度/功耗依赖可选的 LHM 服务。传感器任务当前在用户登录后启动；未登录、驱动读数无效时如实显示缺失。
+
+断线时显示自动重试遮罩并暂停追加旧指标；SSH 可达后自动恢复，重启/断线后重新建立进程 CPU 差分基准。文件页支持右键复制、剪切、重命名、新建、回收站删除；同名目标拒绝静默覆盖。删除只送 Windows 回收站。
+
+## 开发测试
+
+```sh
+node tests/regression.cjs
+node --check app/main.js
+node --check app/renderer.js
+```
+
+测试在隔离 VM 中执行实际主进程/渲染逻辑，并使用短时本机 HTTP 服务测试异常响应；不会连接真实远程机或结束进程。真实机器测试记录另见对应版本交付报告。
+
 ## 构建
 
 ```bash
-cd app && ./build.sh   # 需 macOS + swiftc + Node 22+，自动编译助手/图标/打包/签名/安装
+cd app && ./build.sh   # 历史完整构建脚本；日常更新请遵守下方部署约定
 ```
 
 ## 远程主机部署
@@ -77,3 +93,7 @@ agent/            # 指向 mac-task-manager-n100 的部署脚本（同源）
 - 本机 CPU 频率为估算（Apple Silicon 无用户态频率接口）：`基础频率 + 利用率 × (睿频 − 基础)`，P 核 ≤ 4.41 GHz / E 核 ~2.6 GHz
 - 本机磁盘吞吐 macOS iostat 不区分读/写，显示为合计；远程主机为真实读/写差分
 - 能耗：本机 = 整机份额 × 20W 估算；远程 = 真实 RAPL 封装功耗 × CPU 份额
+
+## 本机部署约定
+
+用户现有部署必须使用全绝对路径 rsync，再 ad-hoc 签名；禁止依赖 cwd 与临时路径变量。更新后用 Electron 可执行文件启动，不能使用 `open`（此环境会静默失败）。版本、状态栏与 CHANGELOG 一起更新；正式发布流程见 iCloud 项目档案。不要用历史 build.sh 的安装/启动步骤代替已确认的部署模板。

@@ -169,14 +169,14 @@ function battPowerColor(d) {
 }
 
 function drawOverlaid(cv, primary, secondary, c1, c2) {
-  drawSeries(cv, primary, c1);
-  if (!cv || !secondary || secondary.length < 2) return;
+  if (!cv) return;
   const { ctx, w, h } = setupCanvas(cv);
-  if (secondary.filter(isNum).length < 2) return;
-  const step = w / (HIST - 1);
-  const x0 = w - (secondary.length - 1) * step;
-  // y 轴量程要含两条线，否则发送曲线会冲出画布
-  strokeSeries(ctx, secondary, x0, step, h, seriesMax(0, primary, secondary), c2, false);
+  ctx.clearRect(0, 0, w, h);
+  const max = seriesMax(0, primary, secondary), step = w / (HIST - 1);
+  for (const [data, color, fill] of [[primary, c1, true], [secondary, c2, false]]) {
+    if (!data || data.filter(isNum).length < 2) continue;
+    strokeSeries(ctx, data, w - (data.length - 1) * step, step, h, max, color, fill);
+  }
 }
 
 // 横轴时间窗标注：窗口 = HIST × 当前采样间隔（本机 2s → 2 分钟；远程 5s → 5 分钟）
@@ -241,6 +241,14 @@ async function renderHostSeg() {
 
 function resetForHostSwitch() {
   latest = null; bodyBuilt = false; builtKey = '';
+  resetFilesForHostSwitch();
+  document.getElementById('connection-hint').style.display = 'none';
+  document.getElementById('detail-body').innerHTML = '';
+  document.getElementById('proc-tbody').innerHTML = '';
+  setText('detail-meta', '正在采集新主机…');
+  setText('osinfo', '正在切换主机…');
+  const cv = document.getElementById('bigchart');
+  if (cv) cv.getContext('2d').clearRect(0, 0, cv.width, cv.height);
   // 保留用户当前查看的卡片（新主机没有该卡片时由 buildSidebarFor/onStats 回落到 CPU）
   // 历史曲线不清空：由 onStats 的 hostChanged 分支 switchHist() 按主机缓存/恢复
   buildSidebarFor(null, true);
@@ -309,6 +317,7 @@ function buildSidebarFor(d, keepCard) {
     el.onclick = () => { activeCard = id; bodyBuilt = false; buildSidebarFor(latest); tickDetail(true); };
     sb.appendChild(el);
   });
+  if (d) updateSidebar(d);
 }
 function buildSidebar() { buildSidebarFor(latest); }
 
@@ -805,14 +814,14 @@ const detailDefs = {
       if (d.power && d.power.style === 'win') {
         return `
         <div class="info-grid cols-3">
-          <div class="info-item"><div class="info-label">整机估算功耗</div><div class="info-value" style="color:var(--orange)" id="pw-pkg">—</div></div>
+          <div class="info-item"><div class="info-label">${d.power.partial ? '已知功耗合计' : '整机估算功耗'}</div><div class="info-value" style="color:var(--orange)" id="pw-pkg">—</div></div>
           <div class="info-item"><div class="info-label">CPU 封装功耗</div><div class="info-value" id="pw-cpu">—</div></div>
           <div class="info-item"><div class="info-label">CPU 温度（Tctl）</div><div class="info-value" id="pw-cupt">—</div></div>
           <div class="info-item"><div class="info-label">GPU 实时功耗</div><div class="info-value" id="pw-gpu">—</div></div>
           <div class="info-item"><div class="info-label">GPU 温度</div><div class="info-value" id="pw-temp">—</div></div>
           <div class="info-item"><div class="info-label">GPU 功耗上限</div><div class="info-value" id="pw-limit">—</div></div>
         </div>
-        <div class="section-title">整机估算 = CPU 封装 + GPU 封装（主板 / 硬盘 / 风扇未计入）· 数据源：WinRing0（AMD SMU）+ nvidia-smi</div>`;
+        <div class="section-title">${d.power.partial ? '部分功耗数据不可用，仅合计可读取的分项' : '整机估算 = CPU 封装 + GPU 封装'}（主板 / 硬盘 / 风扇未计入）</div>`;
       }
       return `
         <div class="info-grid cols-3">
@@ -845,7 +854,7 @@ const detailDefs = {
     },
     meta(d) {
       if (d.power && d.power.style === 'win') {
-        return `整机估算 ${d.power.pkg.toFixed(1)} W（CPU ${d.power.cpu !== null ? d.power.cpu.toFixed(0) : '—'} + GPU ${d.power.gpu !== null ? d.power.gpu.toFixed(0) : '—'}）`;
+        return `${d.power.partial ? '已知合计' : '整机估算'} ${d.power.pkg.toFixed(1)} W（CPU ${d.power.cpu !== null ? d.power.cpu.toFixed(0) : '—'} + GPU ${d.power.gpu !== null ? d.power.gpu.toFixed(0) : '—'}）`;
       }
       return d.power.ok ? `RAPL 实时功耗 · ${d.power.pkg.toFixed(1)} W` : 'RAPL 不可读（需 root 运行 agent）';
     }
@@ -1009,6 +1018,15 @@ let filesPath = null;            // 当前目录，如 'C:\Users\xx'
 let filesItems = [];
 let filesDrive = null;           // { total, free }（仅盘根时有值）
 let filesSel = null;             // 选中项 { name, isDir, size, path }
+let filesRequest = 0, filesSession = 0;
+function resetFilesForHostSwitch() {
+  filesSession++; filesRequest++; filesBusy = false;
+  filesPath = null; filesItems = []; filesDrive = null; filesSel = null; fileClip = null;
+  document.getElementById('files-tbody').innerHTML = '';
+  document.getElementById('files-crumbs').textContent = '';
+  hideCtxMenu(); syncFilesButtons();
+}
+function filesContext() { return filesSession + ':' + filesPath; }
 let filesBusy = false;           // 列目录请求进行中
 let dlActive = false;            // 下载进行中
 
@@ -1099,14 +1117,15 @@ function filesInfoLine() {
 }
 
 async function openDir(p, keepOld) {
-  if (filesBusy) return;
   if (!latest || latest.host.kind !== 'win') { setFilesStatus('文件浏览仅支持 Win 11 主机'); return; }
+  const request = ++filesRequest, session = filesSession;
   filesBusy = true; filesSel = null;
   syncFilesButtons();
   if (!keepOld) setFilesStatus(`<span style="opacity:.7">读取 ${esc(p)} …</span>`);
   const t0 = Date.now();
   let r;
   try { r = await window.bridge.listWinDir(p); } catch (err) { r = { ok: false, err: err.message }; }
+  if (request !== filesRequest || session !== filesSession) return;
   filesBusy = false;
   if (currentView !== 'files') return;
   if (!r || !r.ok) {
@@ -1157,7 +1176,14 @@ document.getElementById('files-download').onclick = () => { if (filesSel) startD
 // ---------- v2.2.0 右键菜单 + 文件操作 ----------
 let fileClip = null;   // { op: 'copy' | 'cut', path, isDir }
 const ctxMenu = document.getElementById('ctx-menu');
-const BAD_NAME = /[\\/:*?"<>|]/;
+const BAD_NAME = /[\\/:*?"<>|\x00-\x1f]/;
+function winNameError(v) {
+  if (!v || !v.trim()) return '名称不能为空';
+  if (BAD_NAME.test(v)) return '名称包含 Windows 不支持的字符';
+  if (/[. ]$/.test(v) || v === '.' || v === '..') return '名称不能以点或空格结尾';
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(v)) return '这是 Windows 保留的设备名';
+  return '';
+}
 
 function showCtxMenu(items, x, y) {
   ctxMenu.innerHTML = items.map(it => it === '-'
@@ -1221,15 +1247,16 @@ document.getElementById('files-view').addEventListener('contextmenu', e => {
 
 async function pasteClip(dst) {
   if (!fileClip) return;
-  const op = fileClip.op, src = fileClip.path;
+  const clip = fileClip, context = filesContext();
+  const op = clip.op, src = clip.path;
   const name = src.split(/[\\/]/).filter(Boolean).pop();
   const target = winJoin(dst, name);
   if (src.toLowerCase() === target.toLowerCase()) { setFilesStatus('⚠ 源与目标相同'); return; }
-  if (op === 'cut') { fileClip = null; renderFilesRows(); }
   setFilesStatus(`${op === 'copy' ? '复制' : '移动'} ${esc(name)} → ${esc(dst)} …`);
   const r = await window.bridge.fileOp(op === 'copy' ? 'copy' : 'move', src, target).catch(err => ({ ok: false, err: err.message }));
-  if (currentView !== 'files') return;
+  if (context !== filesContext() || currentView !== 'files') return;
   if (!r.ok) { setFilesStatus(`⚠ 粘贴失败：${esc(r.err || '未知错误')}`); return; }
+  if (op === 'cut' && fileClip === clip) { fileClip = null; renderFilesRows(); }
   setFilesStatus(`✅ 已${op === 'copy' ? '复制' : '移动'}到 ${esc(target)}`);
   openDir(dst, true);
 }
@@ -1247,9 +1274,9 @@ function filesModal(title, defVal) {
     inp.focus(); inp.select();
     const close = (v) => { m.style.display = 'none'; inp.onkeydown = null; resolve(v); };
     document.getElementById('files-modal-ok').onclick = () => {
-      const v = inp.value.trim();
-      if (!v) { err.textContent = '名称不能为空'; return; }
-      if (BAD_NAME.test(v)) { err.textContent = '名称不能包含 \\ / : * ? " < > |'; return; }
+      const v = inp.value;
+      const error = winNameError(v);
+      if (error) { err.textContent = error; return; }
       close(v);
     };
     document.getElementById('files-modal-cancel').onclick = () => close(null);
@@ -1263,40 +1290,48 @@ function filesModal(title, defVal) {
 }
 
 async function doRename(it) {
+  const context = filesContext(), base = filesPath;
   const nn = await filesModal('重命名 — ' + it.n, it.n);
-  if (!nn || nn === it.n) return;
-  const r = await window.bridge.fileOp('rename', winJoin(filesPath, it.n), nn).catch(err => ({ ok: false, err: err.message }));
+  if (!nn || nn === it.n || context !== filesContext()) return;
+  const r = await window.bridge.fileOp('rename', winJoin(base, it.n), nn).catch(err => ({ ok: false, err: err.message }));
+  if (context !== filesContext()) return;
   if (!r.ok) { setFilesStatus(`⚠ 重命名失败：${esc(r.err || '未知错误')}`); return; }
   setFilesStatus(`✅ 已重命名为 ${esc(nn)}`);
   openDir(filesPath, true);
 }
 
 async function doMkdir() {
+  const context = filesContext(), base = filesPath;
   const nn = await filesModal('新建文件夹 — ' + filesPath, '新建文件夹');
-  if (!nn) return;
-  const r = await window.bridge.fileOp('mkdir', winJoin(filesPath, nn)).catch(err => ({ ok: false, err: err.message }));
+  if (!nn || context !== filesContext()) return;
+  const r = await window.bridge.fileOp('mkdir', winJoin(base, nn)).catch(err => ({ ok: false, err: err.message }));
+  if (context !== filesContext()) return;
   if (!r.ok) { setFilesStatus(`⚠ 新建失败：${esc(r.err || '未知错误')}`); return; }
   setFilesStatus(`✅ 已创建文件夹 ${esc(nn)}`);
   openDir(filesPath, true);
 }
 
 async function doDelete(it) {
+  const context = filesContext();
   const p = winJoin(filesPath, it.n);
   const ok = await window.bridge.confirmDialog('删除确认',
     `确定要把「${it.n}」移入回收站吗？`,
     it.d ? '整个文件夹将移入 Windows 回收站，可随时还原。' : '文件将移入 Windows 回收站，可随时还原。');
+  if (context !== filesContext()) return;
   if (!ok) { setFilesStatus('已取消删除'); return; }
   setFilesStatus(`🗑 正在移入回收站：${esc(it.n)} …`);
   const r = await window.bridge.fileOp('delete', p).catch(err => ({ ok: false, err: err.message }));
+  if (context !== filesContext()) return;
   if (!r.ok) { setFilesStatus(`⚠ 删除失败：${esc(r.err || '未知错误')}`); return; }
   setFilesStatus(`✅ 已移入回收站：${esc(it.n)}`);
   openDir(filesPath, true);
 }
 
 async function doUpload() {
+  const context = filesContext();
   setFilesStatus('⬆ 选择要上传的文件…');
   const r = await window.bridge.uploadWin(filesPath).catch(err => ({ ok: false, err: err.message }));
-  if (currentView !== 'files') return;
+  if (context !== filesContext() || currentView !== 'files') return;
   if (!r) { setFilesStatus('⚠ 上传失败'); return; }
   if (r.err === '已取消') { setFilesStatus(esc(filesInfoLine())); return; }
   if (r.ok) setFilesStatus(`✅ 已上传 ${r.count}/${r.total} 个文件到 ${esc(filesPath)}`);
@@ -1339,9 +1374,10 @@ document.querySelectorAll('#poll-ctl button').forEach(btn => {
 window.addEventListener('keydown', e => {
   if (e.metaKey && e.key === '1') { e.preventDefault(); switchView('perf'); }
   else if (e.metaKey && e.key === '2') { e.preventDefault(); switchView('procs'); }
-  else if (e.metaKey && e.key === '3') { e.preventDefault(); if (latest && latest.host.kind !== 'local') switchView('docker'); }
+  else if (e.metaKey && e.key === '3') { e.preventDefault(); if (latest && latest.host.kind === 'remote') switchView('docker'); }
   else if (e.metaKey && e.key === '4') { e.preventDefault(); if (latest && latest.host.kind === 'win') switchView('files'); }
   else if (e.key === 'Escape') {
+    hideCtxMenu();
     const s = document.getElementById('proc-search');
     if (s.value) { s.value = ''; procQuery = ''; if (latest) renderProcs(latest); }
   }
@@ -1370,12 +1406,25 @@ window.bridge.onLocalHist((d) => {
   });
 });
 
+let connectionLost = false;
 window.bridge.onStats((d) => {
   const hid = d.host && d.host.id;
   if (!hid) return;
   // 切换主机瞬间，上一台主机可能还有一帧在途：它的构建时间早于切换动作，
   // 丢弃它，避免把 A 主机的采样点画进 B 主机的曲线里
-  if (histHostId && hid !== histHostId && (d.ts || 0) < switchAt) return;
+  if (histHostId && hid !== histHostId && switchAt) return;
+  if (d.host.kind !== 'local' && !d.link.ok) {
+    if (!connectionLost) markGap(hist);
+    connectionLost = true;
+    hideCtxMenu();
+    document.getElementById('connection-hint').style.display = 'flex';
+    document.getElementById('sb-dot').className = 'sb-dot bad';
+    setText('sb-left', `连接中断，正在自动重试…（${d.host.name}）`);
+    setText('sb-right', '当前数据不可用，恢复连接后自动刷新');
+    return; // 不把旧值或零值当作新采样点，也不保留可操作的旧进程行。
+  }
+  connectionLost = false;
+  document.getElementById('connection-hint').style.display = 'none';
   const hostChanged = hid !== currentHostId;
   if (hostChanged) {
     switchHist(hid);         // 保存旧主机曲线、恢复新主机曲线（幂等：点切换时已改绑过）

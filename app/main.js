@@ -4,7 +4,7 @@
 //   remote —— 远程 n100_agent（HTTP + gzip，按需采集，省流量）
 //   win    —— 远程 Windows（SSH + PowerShell WMI，免装 agent，目标机只需开启 OpenSSH Server）
 const { app, BrowserWindow, ipcMain, dialog, nativeTheme } = require('electron');
-const { exec, spawn } = require('child_process');
+const { exec, execFile, spawn } = require('child_process');
 const http = require('http');
 const zlib = require('zlib');
 const fs = require('fs');
@@ -58,6 +58,7 @@ function saveCfg(c) { try { fs.writeFileSync(CFG_PATH, JSON.stringify(c, null, 2
 let cfgHadWin = null;   // 首次 loadCfg 时老配置里是否已有 win11（null=未判定）
 let cfg = loadCfg();
 let currentHost = cfg.hosts.find(h => h.id === cfg.activeHost) || cfg.hosts[0];
+let hostEpoch = 0; // 每次切换递增：旧请求即使 A→B→A 也不能回写新会话。
 
 let wantProcs = false;      // 进程页是否打开（远程按需采集）
 let wantDocker = false;     // 容器页是否打开
@@ -315,9 +316,13 @@ async function localGPU() {
   return { util: get('Device Utilization %'), renderer: get('Renderer Utilization %'), tiler: get('Tiler Utilization %'), memBytes: get('In use system memory') };
 }
 
+let netStream = null, netRetry = null, shuttingDown = false;
 function startNetStream() {
+  if (shuttingDown || netStream) return;
   try {
-    const child = exec('nettop -P -x -l 0', { maxBuffer: 128 * 1024 * 1024 }, () => { });
+    const child = spawn('nettop', ['-P', '-n', '-c', '-x', '-s', '2', '-l', '0', '-J', 'bytes_in,bytes_out'], { stdio: ['pipe', 'pipe', 'ignore'] });
+    // 保留 stdin 管道：/dev/null 的 EOF 会使部分 macOS nettop 忙循环。
+    netStream = child;
     let buf = '';
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {
@@ -336,7 +341,13 @@ function startNetStream() {
         liveNet[pid].tx = parseInt(m[4], 10) || 0;
       }
     });
-    child.on('exit', () => { setTimeout(startNetStream, 5000); });
+    const restart = () => {
+      if (netStream !== child) return;
+      netStream = null;
+      if (!shuttingDown) netRetry = setTimeout(startNetStream, 5000);
+    };
+    child.on('error', restart);
+    child.on('close', restart);
   } catch (e) { /* 网速列降级为 — */ }
 }
 
@@ -513,22 +524,24 @@ let rSnap = null, rProcs = { list: [], count: 0 }, rDocker = { containers: [] };
 let rBytes = 0, rRtt = 0, rOk = false, rFail = 0;
 let rLastProcFetch = 0, rLastDockerFetch = 0;
 
-function getJSON(p) {
+function getJSON(p, host = currentHost, epoch = hostEpoch) {
   return new Promise((resolve) => {
     const t0 = Date.now();
     const req = http.request({
-      host: currentHost.host, port: currentHost.port, path: p, method: 'GET', timeout: 8000,
+      host: host.host, port: host.port, path: p, method: 'GET', timeout: 8000,
       headers: { 'Accept-Encoding': 'gzip', 'Connection': 'keep-alive' }
     }, (res) => {
       const chunks = []; let raw = 0;
+      res.on('error', () => resolve({ ok: false }));
+      res.on('aborted', () => resolve({ ok: false }));
       res.on('data', c => { chunks.push(c); raw += c.length; });
       res.on('end', () => {
         let buf = Buffer.concat(chunks);
         try { if (res.headers['content-encoding'] === 'gzip') buf = zlib.gunzipSync(buf); } catch (e) { }
         // 会话流量尽量贴近网卡真实字节：响应体（压缩后）+ 响应头 + 请求头/TCP/IP 头估算（约 240B）
         const hdrBytes = (res.rawHeaders || []).reduce((a, h) => a + Buffer.byteLength(String(h)) + 2, 0);
-        rBytes += raw + hdrBytes + 240;
-        try { resolve({ ok: true, data: JSON.parse(buf.toString('utf8')), ms: Date.now() - t0 }); }
+        if (epoch === hostEpoch) rBytes += raw + hdrBytes + 240;
+        try { resolve({ ok: res.statusCode === 200, data: JSON.parse(buf.toString('utf8')), ms: Date.now() - t0 }); }
         catch (e) { resolve({ ok: false, ms: Date.now() - t0 }); }
       });
     });
@@ -538,11 +551,11 @@ function getJSON(p) {
   });
 }
 
-function postJSON(p, obj) {
+function postJSON(p, obj, host = currentHost) {
   return new Promise((resolve) => {
     const body = Buffer.from(JSON.stringify(obj));
     const req = http.request({
-      host: currentHost.host, port: currentHost.port, path: p, method: 'POST', timeout: 8000,
+      host: host.host, port: host.port, path: p, method: 'POST', timeout: 8000,
       headers: { 'Content-Type': 'application/json', 'Content-Length': body.length }
     }, (res) => {
       let d = ''; res.on('data', c => d += c);
@@ -554,19 +567,27 @@ function postJSON(p, obj) {
   });
 }
 
-async function pollRemote() {
-  const r = await getJSON('/api/snapshot');
-  if (r.ok) { rOk = true; rFail = 0; rRtt = r.ms; rSnap = r.data; }
-  else { rFail++; if (rFail >= 2) rOk = false; }
+async function pollRemote(host = currentHost, epoch = hostEpoch) {
+  const r = await getJSON('/api/snapshot', host, epoch);
+  if (epoch !== hostEpoch || host !== currentHost) return;
+  if (r.ok && r.data && r.data.sys && Array.isArray(r.data.cores) && r.data.mem) {
+    rOk = true; rFail = 0; rRtt = r.ms; rSnap = r.data;
+  } else {
+    rFail++; rOk = false; rSnap = null;
+    rProcs = { list: [], count: 0 }; rDocker = { containers: [] };
+    return;
+  }
   const now = Date.now();
   if (wantProcs && now - rLastProcFetch >= Math.max(cfg.intervalMs, 3000)) {
-    const rp = await getJSON('/api/procs?top=' + cfg.procTop);
-    if (rp.ok) rProcs = rp.data;
+    const rp = await getJSON('/api/procs?top=' + cfg.procTop, host, epoch);
+    if (epoch !== hostEpoch || host !== currentHost) return;
+    rProcs = rp.ok && rp.data ? rp.data : { list: [], count: 0 };
     rLastProcFetch = now;
   }
   if (wantDocker && now - rLastDockerFetch >= 15000) {
-    const rd = await getJSON('/api/docker');
-    if (rd.ok) rDocker = rd.data;
+    const rd = await getJSON('/api/docker', host, epoch);
+    if (epoch !== hostEpoch || host !== currentHost) return;
+    rDocker = rd.ok && rd.data ? rd.data : { containers: [] };
     rLastDockerFetch = now;
   }
 }
@@ -656,7 +677,7 @@ $volumes=@($ld|%{@{mount=$_.DeviceID;total=[long]$_.Size;free=[long]$_.FreeSpace
 $net=@($pn|%{$n=$_.Name;$cn=$n -replace '\\[R\\]','(R)';$a=@($na|?{$_.InterfaceDescription -eq $cn -or $_.Name -eq $n})[0];@{name=$n;rx=[long]$_.BytesReceivedPersec;tx=[long]$_.BytesSentPersec;rxTotal=$(if($a){[long]$a.ReceivedBytes}else{0});txTotal=$(if($a){[long]$a.SentBytes}else{0})}})
 $swT=@($pfu|measure AllocatedBaseSize -Sum).Sum;$swU=@($pfu|measure CurrentUsage -Sum).Sum
 $up=[long]([DateTimeOffset]::Now.Subtract($os.LastBootUpTime).TotalSeconds)
-$o=@{sys=@{hostname=$cs.DNSHostname;os=($os.Caption+' '+$os.Version).Trim();model=($cs.Manufacturer+' '+$cs.Model).Trim();cores=$cs.NumberOfLogicalProcessors;fmax=[int]$pp.MaxClockSpeed;fcur=[int]$pp.CurrentClockSpeed;perf=$fq};uptime=$up;cpu_total=[int]$t.PercentProcessorTime;cpu_user=[int]$t.PercentUserTime;cpu_sys=[int]$t.PercentPrivilegedTime;cpu_idle=[int]$t.PercentIdleTime;cores=$cl|%{[int]$_.PercentProcessorTime};mem=@{total=[long]($os.TotalVisibleMemorySize*1KB);avail=[long]$pm.AvailableBytes;cached=[long]($pm.StandbyCacheCoreBytes+$pm.StandbyCacheNormalPriorityBytes+$pm.StandbyCacheReserveBytes);commit=[long]$pm.CommittedBytes};swap=@{total=[long]($swT*1MB);used=[long]($swU*1MB)};disk=$disks;disk_total_r=[long]$dt.DiskReadBytesPersec;disk_total_w=[long]$dt.DiskWriteBytesPersec;tps=[int]$dt.DiskTransfersPersec;volumes=$volumes;net=$net;procs=$procs}
+$o=@{sys=@{hostname=$cs.DNSHostname;os=($os.Caption+' '+$os.Version).Trim();model=($cs.Manufacturer+' '+$cs.Model).Trim();cores=$cs.NumberOfLogicalProcessors;cpuModel=$pp.Name;fmax=[int]$pp.MaxClockSpeed;fcur=[int]$pp.CurrentClockSpeed;perf=$fq};uptime=$up;cpu_total=[int]$t.PercentProcessorTime;cpu_user=[int]$t.PercentUserTime;cpu_sys=[int]$t.PercentPrivilegedTime;cpu_idle=[int]$t.PercentIdleTime;cores=$cl|%{[int]$_.PercentProcessorTime};mem=@{total=[long]($os.TotalVisibleMemorySize*1KB);avail=[long]$pm.AvailableBytes;cached=[long]($pm.StandbyCacheCoreBytes+$pm.StandbyCacheNormalPriorityBytes+$pm.StandbyCacheReserveBytes);commit=[long]$pm.CommittedBytes};swap=@{total=[long]($swT*1MB);used=[long]($swU*1MB)};disk=$disks;disk_total_r=[long]$dt.DiskReadBytesPersec;disk_total_w=[long]$dt.DiskWriteBytesPersec;tps=[int]$dt.DiskTransfersPersec;volumes=$volumes;net=$net;procs=$procs}
 echo '<<<TMU>>>'
 ConvertTo-Json $o -Compress -Depth 4`;
 
@@ -674,13 +695,14 @@ ConvertTo-Json $gpu -Compress`;
 let wSnap = null, wGpu = null, wSensors = null, wOk = false, wRtt = 0, wFail = 0, wBytes = 0;
 let wPrevProcs = null, wPrevTime = 0;   // 进程 CPU% 差分基准（TotalProcessorTime 秒）
 
-function sshWin(alias, script, timeout = 20000) {
+function sshWin(alias, script, timeout = 20000, epoch = hostEpoch) {
   return new Promise((resolve) => {
     const t0 = Date.now();
     const enc = Buffer.from(script, 'utf16le').toString('base64');
     const args = [
       '-o', 'ControlMaster=auto', '-o', 'ControlPath=/tmp/tmu-win-' + alias + '.sock',
       '-o', 'ControlPersist=300', '-o', 'ConnectTimeout=10', '-o', 'BatchMode=yes',
+      '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=1',
       alias, 'powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand', enc
     ];
     let out = '', done = false;
@@ -691,49 +713,56 @@ function sshWin(alias, script, timeout = 20000) {
       resolve({ ok, out, ms: Date.now() - t0 });
     };
     const killT = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) { } finish(false); }, timeout);
-    child.stdout.on('data', d => { out += d.toString('utf8'); wBytes += d.length; });
+    child.stdout.on('data', d => { out += d.toString('utf8'); if (epoch === hostEpoch) wBytes += d.length; });
     child.on('close', (code) => finish(code === 0 || out.includes('<<<TMU>>>')));
     child.on('error', () => finish(false));
+    child.stdin.on('error', () => finish(false));
     child.stdin.end('');
   });
 }
 
 function parseWinJson(out) {
-  const i = out.indexOf('<<<TMU>>>');
+  const marker = '<<<TMU>>>';
+  const i = out.indexOf(marker);
   if (i < 0) return null;
-  const j = out.indexOf('{', i);
-  if (j < 0) return null;
-  try { return JSON.parse(out.slice(j)); } catch (e) { return null; }
+  try { return JSON.parse(out.slice(i + marker.length).trim()); } catch (e) { return null; }
 }
 
-async function pollWindows() {
-  const alias = currentHost.host;
-  // 主脚本先发，GPU / 传感器服务错峰后发（避开 ControlMaster 建立时的并发竞争）
-  const rMain = sshWin(alias, WIN_PS);
+function parseSensorJson(out) {
+  // 旧 LHM 输出裸 NaN/Infinity，不是合法 JSON；只替换数值 token，保留其他传感器。
+  const text = out.replace(/(:\s*)(?:NaN|-?Infinity)(?=\s*[,}])/g, '$1null');
+  try { const data = JSON.parse(text); return Array.isArray(data) && data.length ? data : null; }
+  catch (e) { return null; }
+}
+
+function invalidateWindows() {
+  wOk = false; wSnap = null; wGpu = null; wSensors = null;
+  wPrevProcs = null; wPrevTime = 0;
+}
+
+async function pollWindows(host = currentHost, epoch = hostEpoch) {
+  const alias = host.host;
+  const rMain = sshWin(alias, WIN_PS, 20000, epoch);
   const rGpu = (async () => {
-    await new Promise(r2 => setTimeout(r2, 500));
-    return sshWin(alias, WIN_GPU);
+    await new Promise(r => setTimeout(r, 500));
+    return sshWin(alias, WIN_GPU, 20000, epoch);
   })();
-  // v1.2.3：LibreHardwareMonitor 传感器服务（Win11 上常驻 HttpListener :8086，
-  // WinRing0 内核驱动读 AMD SMU / MSR），SSH 里 curl 本机端口即可，毫秒级返回
   const rSns = (async () => {
-    await new Promise(r2 => setTimeout(r2, 900));
-    return sshWin(alias, 'curl.exe -s --max-time 10 http://127.0.0.1:8086/', 15000);
+    await new Promise(r => setTimeout(r, 900));
+    return sshWin(alias, 'curl.exe -s --max-time 10 http://127.0.0.1:8086/', 15000, epoch);
   })();
   const [r, rg, rs] = await Promise.all([rMain, rGpu, rSns]);
-  if (!r.ok) { wFail++; if (wFail >= 2) wOk = false; return; }
-  const snap = parseWinJson(r.out);
-  if (!snap || !snap.sys) { wFail++; if (wFail >= 2) wOk = false; return; }
-  wFail = 0; wOk = true; wRtt = r.ms; wSnap = snap;
-  const g = rg.ok ? parseWinJson(rg.out) : null;   // 无 NVIDIA 显卡时为 null
-  if (g) wGpu = g;
-  // 传感器服务未运行（脚本损坏/未部署）时保持上次值，不影响其余页面
-  if (rs.ok) {
-    try {
-      const arr = JSON.parse(rs.out);
-      if (Array.isArray(arr) && arr.length) wSensors = arr;
-    } catch (e) { /* 传感器服务离线 */ }
+  if (epoch !== hostEpoch || host !== currentHost) return;
+  const snap = r.ok ? parseWinJson(r.out) : null;
+  if (!snap || !snap.sys || !Array.isArray(snap.cores) || !snap.mem) {
+    wFail++; invalidateWindows(); return;
   }
+  // 重启后 uptime 回退/PID 重用不能与上次会话的累计 CPU 秒数做差分。
+  if (!wOk || (wSnap && snap.uptime < wSnap.uptime)) { wPrevProcs = null; wPrevTime = 0; }
+  wFail = 0; wOk = true; wRtt = r.ms; wSnap = snap;
+  const g = rg.ok ? parseWinJson(rg.out) : null;
+  wGpu = g && !Array.isArray(g) && typeof g === 'object' ? g : null;
+  wSensors = rs.ok ? parseSensorJson(rs.out) : null;
 }
 
 function buildWinPayload() {
@@ -793,7 +822,7 @@ function buildWinPayload() {
         total: s.cpu_total || 0, user: s.cpu_user || 0, sys: s.cpu_sys || 0, idle: s.cpu_idle || 0, iowait: 0,
         freq, freqMax: freq.length ? Math.max(...freq) : 0, freqSources: sources,
         coreTypes: [], pUsage: null, eUsage: null, freqP: null, freqE: null,
-        load: null, model: sys.model || ''
+        load: null, model: sys.cpuModel || sys.model || ''
       };
     })(),
     mem: {
@@ -825,10 +854,13 @@ function buildWinPayload() {
     power: (() => {
       const pick = (hw, type, re) => {
         const s = (wSensors || []).find(x => x.hw === hw && x.type === type && re.test(x.name || ''));
-        return s && typeof s.val === 'number' ? s.val : null;
+        return s && Number.isFinite(s.val) ? s.val : null;
       };
-      const cpuP = pick('Cpu', 'Power', /^Package$/i);
-      const cpuT = pick('Cpu', 'Temperature', /Tctl|Tdie|^Package/i);
+      const cpuPower = pick('Cpu', 'Power', /^Package$/i);
+      const cpuTemp = pick('Cpu', 'Temperature', /Tctl|Tdie|^Package/i);
+      // WinRing0 读数失败还会返回 0：桌面 CPU 封装不可能实际为 0 W / 0℃。
+      const cpuP = cpuPower > 0 ? cpuPower : null;
+      const cpuT = cpuTemp > 0 ? cpuTemp : null;
       const gpuS = pick('GpuNvidia', 'Power', /Package/i);
       const gpuT = pick('GpuNvidia', 'Temperature', /^GPU Core$/i);
       const gpuP = (wGpu && typeof wGpu.power === 'number' && wGpu.power >= 0) ? wGpu.power : gpuS;
@@ -839,7 +871,7 @@ function buildWinPayload() {
         style: 'win',
         pkg: (cpuP || 0) + (gpuP || 0),           // 整机估算，喂侧栏摘要与曲线
         cpu: cpuP, cpuTemp: cpuT, gpu: gpuP, gpuTemp,
-        limit, ok: true
+        limit, partial: cpuP === null || gpuP === null, ok: true
       };
     })(),
     batt: null,
@@ -881,13 +913,13 @@ async function poll() {
   // 否则定时器会叠加出多路并发采集，既让差分基准互相覆盖又白吃 CPU
   if (polling) { pendingPoll = true; return; }
   if (!win || win.isDestroyed()) return;
-  const host = currentHost;
+  const host = currentHost, epoch = hostEpoch;
   polling = true;
   try {
     polls++;
-    if (host.kind === 'win') await pollWindows(); else await pollRemote();
+    if (host.kind === 'win') await pollWindows(host, epoch); else await pollRemote(host, epoch);
     // 采集期间用户切换了主机：丢弃这份旧主机的数据，避免张冠李戴
-    if (host !== currentHost) return;
+    if (host !== currentHost || epoch !== hostEpoch) return;
     win.webContents.send('stats', host.kind === 'win' ? buildWinPayload() : buildRemotePayload());
   } catch (e) { console.error('poll error', e); }
   finally {
@@ -946,6 +978,12 @@ app.whenReady().then(async () => {
   createWindow();
 });
 
+app.on('before-quit', () => {
+  shuttingDown = true;
+  if (netRetry) clearTimeout(netRetry);
+  if (netStream) netStream.kill();
+});
+
 app.on('window-all-closed', () => {
   if (timer) clearInterval(timer);
   if (localTimer) clearInterval(localTimer);
@@ -966,6 +1004,7 @@ ipcMain.handle('get-hosts', () => ({ hosts: cfg.hosts, active: currentHost.id, i
 ipcMain.handle('set-host', (e, id) => {
   const h = cfg.hosts.find(x => x.id === id);
   if (!h) return false;
+  hostEpoch++;
   currentHost = h; cfg.activeHost = id; saveCfg(cfg);
   // 切换主机：重置远程缓存与流量计数，立即采一次
   rSnap = null; rProcs = { list: [], count: 0 }; rDocker = { containers: [] };
@@ -976,7 +1015,7 @@ ipcMain.handle('set-host', (e, id) => {
   lastIfaces = null; lastNetTime = 0; lastProcRaw = null; lastProcsTime = 0;
   if (h.kind === 'local') lRefreshUI = true;   // 后台期间进程/卷列表没采，切回先补一拍
   schedule();
-  if (h.kind === 'remote') poll(); else sampleLocal();   // 立即出一帧；本机在途则由 pending 补
+  if (h.kind !== 'local') poll(); else sampleLocal();   // 立即出一帧；本机在途则由 pending 补
   return true;
 });
 ipcMain.handle('add-host', (e, h) => {
@@ -996,6 +1035,7 @@ ipcMain.handle('remove-host', (e, id) => {
   const wasActive = currentHost.id === id;
   cfg.hosts = cfg.hosts.filter(h => h.id !== id);
   if (wasActive) {
+    hostEpoch++;
     currentHost = cfg.hosts[0];
     cfg.activeHost = currentHost.id;
     // 与 set-host 一致：清缓存 + 重排定时器，否则切回本机后仍按远程档位（如 10 秒）刷新
@@ -1013,9 +1053,9 @@ ipcMain.handle('remove-host', (e, id) => {
   return true;
 });
 ipcMain.handle('kill-process', async (e, rawPid) => {
-  const pid = parseInt(rawPid, 10);
-  // 白名单校验：只接受正整数 pid，既防误杀（0/负数=进程组/伪行）也防命令注入
-  if (!Number.isInteger(pid) || pid <= 1) return '无效的进程号';
+  const pid = Number(rawPid);
+  if (!Number.isSafeInteger(pid) || pid <= 1) return '无效的进程号';
+  const target = currentHost, epoch = hostEpoch, targetUptime = wSnap && wSnap.uptime;
   const isLocal = currentHost.kind === 'local';
   const isWin = currentHost.kind === 'win';
   const where = isLocal ? 'MacBook' : `${currentHost.name}（${currentHost.host}）`;
@@ -1028,6 +1068,8 @@ ipcMain.handle('kill-process', async (e, rawPid) => {
       : '将向远程 agent 发送 SIGTERM，未保存的数据可能会丢失。'
   });
   if (r.response !== 0) return '已取消';
+  if (epoch !== hostEpoch || target !== currentHost) return '主机已切换，已取消结束进程';
+  if (isWin && (!wOk || !wSnap || (targetUptime !== null && wSnap.uptime < targetUptime))) return '连接中断或主机已重启，已取消结束进程';
   if (isLocal) {
     return new Promise((resolve) => {
       exec(`kill -9 ${pid}`, (err) => resolve(err ? '失败：' + err.message : `已结束进程 ${pid}`));
@@ -1036,11 +1078,11 @@ ipcMain.handle('kill-process', async (e, rawPid) => {
   if (isWin) {
     // taskkill 的中文输出是 GBK，不解析文本，只按退出码判定
     return new Promise((resolve) => {
-      exec(`ssh -o BatchMode=yes -o ConnectTimeout=10 ${currentHost.host} taskkill /F /PID ${pid}`,
+      execFile('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', target.host, 'taskkill', '/F', '/PID', String(pid)],
         { timeout: 15000 }, (err) => resolve(err ? `远程结束失败（PID ${pid}）` : `已结束远程进程 ${pid}`));
     });
   }
-  const res = await postJSON('/api/kill', { pid, sig: 'TERM' });
+  const res = await postJSON('/api/kill', { pid, sig: 'TERM' }, target);
   try {
     const j = JSON.parse(res.body || '{}');
     if (j.ok) return `已结束远程进程 ${pid}`;
@@ -1054,7 +1096,7 @@ ipcMain.handle('kill-process', async (e, rawPid) => {
 // 列目录：按需生成 PowerShell 脚本（路径内嵌，单引号转义），复用 sshWin 通道
 function winListScript(dir) {
   const p = String(dir).replace(/'/g, "''");
-  return `$ErrorActionPreference='SilentlyContinue'
+  return `$ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $p='${p}'
 $drv=if($p -match '^([A-Za-z]:)'){$Matches[1]}else{$null}
@@ -1068,14 +1110,23 @@ Write-Output '<<<TMU>>>'
 ConvertTo-Json $o -Compress -Depth 3`;
 }
 
+function sftpQuote(value) {
+  const s = String(value);
+  if (/[\r\n\0]/.test(s)) throw new Error('路径含不支持的控制字符');
+  return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+}
+
 function sftpBaseArgs(alias) {
   return ['-o', 'ControlMaster=auto', '-o', 'ControlPath=/tmp/tmu-win-' + alias + '.sock',
-    '-o', 'ControlPersist=300', '-o', 'ConnectTimeout=10', '-o', 'BatchMode=yes'];
+    '-o', 'ControlPersist=300', '-o', 'ConnectTimeout=10', '-o', 'BatchMode=yes',
+      '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=1'];
 }
 
 ipcMain.handle('win-list-dir', async (e, dir) => {
   if (currentHost.kind !== 'win') return { ok: false, err: '文件浏览仅支持 Win 11 主机' };
-  const r = await sshWin(currentHost.host, winListScript(dir), 15000);
+  const target = currentHost, epoch = hostEpoch;
+  const r = await sshWin(target.host, winListScript(dir), 15000, epoch);
+  if (epoch !== hostEpoch) return { ok: false, err: '主机已切换' };
   const j = parseWinJson(r.out);
   if (!j) return { ok: false, err: r.ok ? '输出解析失败' : 'SSH 连接失败' };
   return j;
@@ -1085,6 +1136,7 @@ ipcMain.handle('win-list-dir', async (e, dir) => {
 ipcMain.handle('win-download', async (e, { path: rp, isDir, size }) => {
   if (currentHost.kind !== 'win') return { ok: false, err: '仅支持 Win 11 主机' };
   if (!rp || /["\r\n]/.test(rp)) return { ok: false, err: '路径为空或含不支持的字符' };
+  const target = currentHost, epoch = hostEpoch;
   const name = rp.split(/[\\/]/).filter(Boolean).pop() || 'download';
   let dest;
   if (isDir) {
@@ -1104,16 +1156,21 @@ ipcMain.handle('win-download', async (e, { path: rp, isDir, size }) => {
     if (r2.canceled || !r2.filePath) return { ok: false, err: '已取消' };
     dest = r2.filePath;
   }
+  if (epoch !== hostEpoch) return { ok: false, err: '主机已切换，已取消下载' };
   // Windows OpenSSH 的 sftp 绝对路径形式是 /C:/...
   const drive = rp.slice(0, 2); // "C:"
   const rest = rp.slice(2).replace(/\\/g, '/');
   const remotePath = '/' + drive + rest;
-  const batch = (isDir ? 'get -r ' : 'get ') + `"${remotePath}" "${dest}"\n`;
+  const batch = (isDir ? 'get -r ' : 'get ') + sftpQuote(remotePath) + ' ' + sftpQuote(dest) + '\n';
   return await new Promise((resolve) => {
-    const child = spawn('sftp', [...sftpBaseArgs(currentHost.host), '-b', '-', currentHost.host]);
+    const child = spawn('sftp', [...sftpBaseArgs(target.host), '-b', '-', target.host]);
     let finished = false, lastSent = 0;
     const done = (r) => { if (finished) return; finished = true; clearInterval(tick); resolve(r); };
     const tick = setInterval(() => {
+      if (isDir) {
+        if (!lastSent && win && !win.isDestroyed()) win.webContents.send('dl-progress', { note: '⬇ 正在传输目录，总量未知…' });
+        lastSent = 1; return;
+      }
       try {
         const st = fs.statSync(dest);
         if (st.size !== lastSent) {
@@ -1128,6 +1185,7 @@ ipcMain.handle('win-download', async (e, { path: rp, isDir, size }) => {
       done(ok ? { ok: true, dest } : { ok: false, err: 'sftp 传输失败（退出码 ' + code + '）' });
     });
     child.on('error', (err) => done({ ok: false, err: 'sftp 启动失败：' + err.message }));
+    child.stdin.on('error', () => done({ ok: false, err: 'sftp 连接中断' }));
     child.stdin.end(batch);
   });
 });
@@ -1141,8 +1199,12 @@ function winOpScript(op, a, b) {
   let body = '';
   if (op === 'rename') body = `Rename-Item -LiteralPath ${A} -NewName ${B}`;
   else if (op === 'mkdir') body = `New-Item -ItemType Directory -Path ${A} | Out-Null`;
-  else if (op === 'copy') body = `Copy-Item -LiteralPath ${A} -Destination ${B} -Recurse -Force`;
-  else if (op === 'move') body = `Move-Item -LiteralPath ${A} -Destination ${B} -Force`;
+  else if (op === 'copy' || op === 'move') {
+    const src = String(a).replace(/[\\/]+$/, '').toLowerCase();
+    const dst = String(b).replace(/[\\/]+$/, '').toLowerCase();
+    if (dst === src || dst.startsWith(src + '\\')) body = `throw '源与目标不能相同或嵌套'`;
+    else body = `if(Test-Path -LiteralPath ${B}){throw '目标已存在，请选择其他位置或名称'};${op === 'copy' ? 'Copy-Item' : 'Move-Item'} -LiteralPath ${A} -Destination ${B}${op === 'copy' ? ' -Recurse' : ''}`;
+  }
   else if (op === 'delete') body = `if(Test-Path -LiteralPath ${A} -PathType Container){[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(${A},'OnlyErrorDialogs','SendToRecycleBin')}else{[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(${A},'OnlyErrorDialogs','SendToRecycleBin')}`;
   else return null;
   return `$ErrorActionPreference='Stop'
@@ -1162,7 +1224,7 @@ ConvertTo-Json $o -Compress
 
 ipcMain.handle('win-file-op', async (e, { op, a, b }) => {
   if (currentHost.kind !== 'win') return { ok: false, err: '仅支持 Win 11 主机' };
-  if (!a || (op === 'rename' && !b)) return { ok: false, err: '参数缺失' };
+  if (!a || (['rename', 'copy', 'move'].includes(op) && !b)) return { ok: false, err: '参数缺失' };
   const script = winOpScript(op, a, b);
   if (!script) return { ok: false, err: '未知操作：' + op };
   const r = await sshWin(currentHost.host, script, 20000);
@@ -1184,24 +1246,36 @@ ipcMain.handle('confirm-dialog', async (e, { title, message, detail }) => {
 ipcMain.handle('win-upload', async (e, { dir }) => {
   if (currentHost.kind !== 'win') return { ok: false, err: '仅支持 Win 11 主机' };
   if (!dir) return { ok: false, err: '目标目录缺失' };
+  const target = currentHost, epoch = hostEpoch;
   const r2 = await dialog.showOpenDialog(win, {
     title: '选择要上传到 ' + currentHost.name + ' 的文件（可多选）',
     defaultPath: app.getPath('downloads'),
     properties: ['openFile', 'multiSelections']
   });
   if (r2.canceled || !r2.filePaths.length) return { ok: false, err: '已取消' };
+  if (epoch !== hostEpoch) return { ok: false, err: '主机已切换，已取消上传' };
   const drive = dir.slice(0, 2), rest = dir.slice(2).replace(/\\/g, '/');
   const remoteDir = '/' + drive + (rest.endsWith('/') ? rest : rest + '/');
+  const listing = await sshWin(target.host, winListScript(dir), 15000, epoch);
+  const directory = listing.ok ? parseWinJson(listing.out) : null;
+  if (epoch !== hostEpoch) return { ok: false, err: '主机已切换，已取消上传' };
+  if (!directory || !directory.ok) return { ok: false, err: '上传前无法检查目标目录' };
+  const existing = new Set((directory.items || []).map(x => x.n.toLowerCase()));
+  const collisions = r2.filePaths.map(x => path.basename(x)).filter(x => existing.has(x.toLowerCase()));
+  if (collisions.length) return { ok: false, err: '目标已存在，未覆盖：' + collisions.join('、') };
   const results = [];
   for (let i = 0; i < r2.filePaths.length; i++) {
+    if (epoch !== hostEpoch) return { ok: false, err: '主机已切换，已停止后续上传' };
     const lp = r2.filePaths[i];
     const bn = path.basename(lp);
     if (win && !win.isDestroyed()) win.webContents.send('dl-progress', { done: false, note: `⬆ 上传中 (${i + 1}/${r2.filePaths.length}) ${bn}` });
-    const batch = `put ${JSON.stringify(lp)} ${JSON.stringify(remoteDir + bn)}\n`;
+    if (/[<>:"/\\|?*\r\n]/.test(bn)) return { ok: false, err: 'Windows 不支持此文件名：' + bn };
+    const batch = 'put ' + sftpQuote(lp) + ' ' + sftpQuote(remoteDir + bn) + '\n';
     const ok = await new Promise((resolve) => {
-      const child = spawn('sftp', [...sftpBaseArgs(currentHost.host), '-b', '-', currentHost.host]);
+      const child = spawn('sftp', [...sftpBaseArgs(target.host), '-b', '-', target.host]);
       child.on('close', (code) => resolve(code === 0));
       child.on('error', () => resolve(false));
+      child.stdin.on('error', () => resolve(false));
       child.stdin.end(batch);
     });
     results.push({ name: bn, ok });
