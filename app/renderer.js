@@ -1076,6 +1076,11 @@ function renderFilesRows() {
       startDownload({ name: it.n, isDir: !!it.d, size: it.l || 0, path: winJoin(filesPath, it.n) });
     };
   });
+  // 剪切中的条目置灰提示
+  if (fileClip && fileClip.op === 'cut') {
+    const ci = filesItems.findIndex(x => winJoin(filesPath, x.n).toLowerCase() === fileClip.path.toLowerCase());
+    if (ci >= 0 && tb.children[ci]) tb.children[ci].classList.add('cut-src');
+  }
 }
 
 function syncFilesButtons() {
@@ -1133,6 +1138,7 @@ async function startDownload(sel) {
 }
 
 window.bridge.onDlProgress((d) => {
+  if (d.note) { setFilesStatus(esc(d.note)); return; }
   if (d.done) return; // 结束态由 startDownload 统一处理
   let s;
   if (d.total) {
@@ -1147,6 +1153,156 @@ window.bridge.onDlProgress((d) => {
 document.getElementById('files-up').onclick = () => { const p = winParentDir(filesPath); if (p) openDir(p); };
 document.getElementById('files-refresh').onclick = () => { if (filesPath) openDir(filesPath); };
 document.getElementById('files-download').onclick = () => { if (filesSel) startDownload(filesSel); };
+
+// ---------- v2.2.0 右键菜单 + 文件操作 ----------
+let fileClip = null;   // { op: 'copy' | 'cut', path, isDir }
+const ctxMenu = document.getElementById('ctx-menu');
+const BAD_NAME = /[\\/:*?"<>|]/;
+
+function showCtxMenu(items, x, y) {
+  ctxMenu.innerHTML = items.map(it => it === '-'
+    ? '<div class="ctx-sep"></div>'
+    : `<div class="ctx-item${it.danger ? ' danger' : ''}${it.disabled ? ' disabled' : ''}" data-id="${it.id}">${esc(it.label)}</div>`).join('');
+  ctxMenu.style.display = 'block';
+  const r = ctxMenu.getBoundingClientRect();
+  ctxMenu.style.left = Math.min(x, innerWidth - r.width - 8) + 'px';
+  ctxMenu.style.top = Math.min(y, innerHeight - r.height - 8) + 'px';
+  [...ctxMenu.querySelectorAll('.ctx-item')].forEach(el => {
+    el.onclick = () => {
+      const it = items.find(i => i && i.id === el.dataset.id);
+      hideCtxMenu();
+      if (it && !it.disabled && it.fn) it.fn();
+    };
+  });
+}
+function hideCtxMenu() { ctxMenu.style.display = 'none'; }
+window.addEventListener('click', hideCtxMenu);
+window.addEventListener('blur', hideCtxMenu);
+window.addEventListener('resize', hideCtxMenu);
+
+function ctxBaseItems(it) {
+  const p = winJoin(filesPath, it.n);
+  return [
+    ...(it.d ? [{ id: 'open', label: '进入', fn: () => openDir(p) }] : [{ id: 'dl', label: '下载到 Mac', fn: () => startDownload({ name: it.n, isDir: false, size: it.l || 0, path: p }) }]),
+    ...(it.d ? [{ id: 'dl', label: '下载到 Mac（整目录）', fn: () => startDownload({ name: it.n, isDir: true, size: 0, path: p }) }] : []),
+    '-',
+    { id: 'copy', label: '复制', fn: () => { fileClip = { op: 'copy', path: p, isDir: it.d }; setFilesStatus(`已复制：${esc(p)}（到目标目录右键粘贴）`); } },
+    { id: 'cut', label: '剪切', fn: () => { fileClip = { op: 'cut', path: p, isDir: it.d }; setFilesStatus(`已剪切：${esc(p)}（到目标目录右键粘贴）`); renderFilesRows(); } },
+    ...(it.d ? [{ id: 'pastein', label: '粘贴到此处', disabled: !fileClip, fn: () => pasteClip(p) }] : []),
+    '-',
+    { id: 'rename', label: '重命名', fn: () => doRename(it) },
+    { id: 'delete', label: '删除（送回收站）', danger: true, fn: () => doDelete(it) },
+    '-',
+    { id: 'copypath', label: '复制路径', fn: () => { navigator.clipboard.writeText(p); setFilesStatus(`路径已复制：${esc(p)}`); } }
+  ];
+}
+
+function ctxBlankItems() {
+  return [
+    { id: 'paste', label: '粘贴到此处', disabled: !fileClip, fn: () => pasteClip(filesPath) },
+    { id: 'mkdir', label: '新建文件夹', fn: () => doMkdir() },
+    { id: 'upload', label: '上传文件（Mac → Win11）', fn: () => doUpload() },
+    '-',
+    { id: 'refresh', label: '刷新', fn: () => openDir(filesPath, true) }
+  ];
+}
+
+document.getElementById('files-view').addEventListener('contextmenu', e => {
+  if (!latest || latest.host.kind !== 'win') return;
+  e.preventDefault();
+  const tr = e.target.closest('#files-tbody tr[data-idx]');
+  if (tr) {
+    const it = filesItems[+tr.dataset.idx];
+    showCtxMenu(ctxBaseItems(it), e.clientX, e.clientY);
+  } else if (e.target.closest('#files-view')) {
+    showCtxMenu(ctxBlankItems(), e.clientX, e.clientY);
+  }
+});
+
+async function pasteClip(dst) {
+  if (!fileClip) return;
+  const op = fileClip.op, src = fileClip.path;
+  const name = src.split(/[\\/]/).filter(Boolean).pop();
+  const target = winJoin(dst, name);
+  if (src.toLowerCase() === target.toLowerCase()) { setFilesStatus('⚠ 源与目标相同'); return; }
+  if (op === 'cut') { fileClip = null; renderFilesRows(); }
+  setFilesStatus(`${op === 'copy' ? '复制' : '移动'} ${esc(name)} → ${esc(dst)} …`);
+  const r = await window.bridge.fileOp(op === 'copy' ? 'copy' : 'move', src, target).catch(err => ({ ok: false, err: err.message }));
+  if (currentView !== 'files') return;
+  if (!r.ok) { setFilesStatus(`⚠ 粘贴失败：${esc(r.err || '未知错误')}`); return; }
+  setFilesStatus(`✅ 已${op === 'copy' ? '复制' : '移动'}到 ${esc(target)}`);
+  openDir(dst, true);
+}
+
+// 输入弹窗：返回输入值或 null
+function filesModal(title, defVal) {
+  return new Promise((resolve) => {
+    const m = document.getElementById('files-modal');
+    const inp = document.getElementById('files-modal-input');
+    const err = document.getElementById('files-modal-err');
+    document.getElementById('files-modal-title').textContent = title;
+    inp.value = defVal || '';
+    err.textContent = '';
+    m.style.display = 'flex';
+    inp.focus(); inp.select();
+    const close = (v) => { m.style.display = 'none'; inp.onkeydown = null; resolve(v); };
+    document.getElementById('files-modal-ok').onclick = () => {
+      const v = inp.value.trim();
+      if (!v) { err.textContent = '名称不能为空'; return; }
+      if (BAD_NAME.test(v)) { err.textContent = '名称不能包含 \\ / : * ? " < > |'; return; }
+      close(v);
+    };
+    document.getElementById('files-modal-cancel').onclick = () => close(null);
+    inp.onkeydown = (ev) => {
+      if (ev.key === 'Enter') document.getElementById('files-modal-ok').click();
+      if (ev.key === 'Escape') close(null);
+      ev.stopPropagation();
+    };
+    m.onmousedown = (ev) => { if (ev.target === m) close(null); };
+  });
+}
+
+async function doRename(it) {
+  const nn = await filesModal('重命名 — ' + it.n, it.n);
+  if (!nn || nn === it.n) return;
+  const r = await window.bridge.fileOp('rename', winJoin(filesPath, it.n), nn).catch(err => ({ ok: false, err: err.message }));
+  if (!r.ok) { setFilesStatus(`⚠ 重命名失败：${esc(r.err || '未知错误')}`); return; }
+  setFilesStatus(`✅ 已重命名为 ${esc(nn)}`);
+  openDir(filesPath, true);
+}
+
+async function doMkdir() {
+  const nn = await filesModal('新建文件夹 — ' + filesPath, '新建文件夹');
+  if (!nn) return;
+  const r = await window.bridge.fileOp('mkdir', winJoin(filesPath, nn)).catch(err => ({ ok: false, err: err.message }));
+  if (!r.ok) { setFilesStatus(`⚠ 新建失败：${esc(r.err || '未知错误')}`); return; }
+  setFilesStatus(`✅ 已创建文件夹 ${esc(nn)}`);
+  openDir(filesPath, true);
+}
+
+async function doDelete(it) {
+  const p = winJoin(filesPath, it.n);
+  const ok = await window.bridge.confirmDialog('删除确认',
+    `确定要把「${it.n}」移入回收站吗？`,
+    it.d ? '整个文件夹将移入 Windows 回收站，可随时还原。' : '文件将移入 Windows 回收站，可随时还原。');
+  if (!ok) { setFilesStatus('已取消删除'); return; }
+  setFilesStatus(`🗑 正在移入回收站：${esc(it.n)} …`);
+  const r = await window.bridge.fileOp('delete', p).catch(err => ({ ok: false, err: err.message }));
+  if (!r.ok) { setFilesStatus(`⚠ 删除失败：${esc(r.err || '未知错误')}`); return; }
+  setFilesStatus(`✅ 已移入回收站：${esc(it.n)}`);
+  openDir(filesPath, true);
+}
+
+async function doUpload() {
+  setFilesStatus('⬆ 选择要上传的文件…');
+  const r = await window.bridge.uploadWin(filesPath).catch(err => ({ ok: false, err: err.message }));
+  if (currentView !== 'files') return;
+  if (!r) { setFilesStatus('⚠ 上传失败'); return; }
+  if (r.err === '已取消') { setFilesStatus(esc(filesInfoLine())); return; }
+  if (r.ok) setFilesStatus(`✅ 已上传 ${r.count}/${r.total} 个文件到 ${esc(filesPath)}`);
+  else setFilesStatus(`⚠ ${esc(r.err || '上传失败')}`);
+  openDir(filesPath, true);
+}
 function selectCard(id) {
   if (!detailDefs[id]) return;
   activeCard = id; bodyBuilt = false;

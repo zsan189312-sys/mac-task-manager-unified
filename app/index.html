@@ -255,6 +255,7 @@
   #files-table tbody tr { cursor: pointer; }
   #files-table tbody tr:hover { background: rgba(255,255,255,0.045); }
   #files-table tbody tr.selected { background: rgba(10,132,255,0.16); }
+  #files-table tr.cut-src { opacity: .45; }
   #files-table td:first-child { user-select: text; -webkit-user-select: text; }
   .f-act { cursor: pointer; opacity: 0; transition: opacity .12s ease; padding: 2px 6px; border-radius: 4px; }
   #files-table tbody tr:hover .f-act { opacity: .85; }
@@ -268,6 +269,48 @@
   }
   #files-status .dl-bar { flex: 1; max-width: 320px; height: 5px; background: var(--surface); border-radius: 3px; overflow: hidden; }
   #files-status .dl-fill { height: 100%; background: var(--cyan); border-radius: 3px; transition: width .3s ease; }
+
+  /* v2.2.0 右键菜单 + 输入弹窗 */
+  #ctx-menu {
+    position: fixed; z-index: 1000; min-width: 168px;
+    background: #1f1f23; border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 10px; padding: 4px;
+    box-shadow: 0 12px 34px rgba(0,0,0,0.55);
+  }
+  .ctx-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 12px; border-radius: 6px; font-size: 12.5px; color: var(--text);
+    cursor: pointer; white-space: nowrap; line-height: 1;
+  }
+  .ctx-item:hover { background: rgba(10,132,255,0.28); }
+  .ctx-item.danger { color: #ff6961; }
+  .ctx-item.danger:hover { background: rgba(255,69,58,0.22); }
+  .ctx-item.disabled { opacity: .35; cursor: default; }
+  .ctx-item.disabled:hover { background: none; }
+  .ctx-sep { height: 1px; margin: 4px 8px; background: rgba(255,255,255,0.1); }
+  #files-modal {
+    position: fixed; inset: 0; z-index: 1100; background: rgba(0,0,0,0.45);
+    display: flex; align-items: center; justify-content: center;
+  }
+  #files-modal-box {
+    width: 380px; background: #232327; border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 12px; padding: 18px 20px 16px; box-shadow: 0 16px 44px rgba(0,0,0,0.6);
+  }
+  #files-modal-title { font-size: 13.5px; font-weight: 600; margin-bottom: 12px; }
+  #files-modal-input {
+    width: 100%; box-sizing: border-box; background: var(--surface);
+    border: 1px solid var(--hairline); color: var(--text); border-radius: 7px;
+    padding: 8px 11px; font-size: 13px; outline: none; font-family: inherit;
+  }
+  #files-modal-input:focus { border-color: var(--accent); }
+  #files-modal-err { color: #ff6961; font-size: 12px; min-height: 18px; margin-top: 6px; }
+  #files-modal-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+  #files-modal-btns button {
+    border: 1px solid var(--hairline); background: var(--surface); color: var(--text);
+    border-radius: 7px; padding: 7px 16px; font-size: 12.5px; cursor: pointer; font-family: inherit;
+  }
+  #files-modal-btns button:hover { border-color: var(--accent); }
+  #files-modal-btns #files-modal-ok { background: rgba(10,132,255,0.3); border-color: rgba(10,132,255,0.5); }
   #proc-table, #docker-table { width: 100%; border-collapse: collapse; }
   #proc-table th, #docker-table th {
     text-align: left; color: var(--text-3); font-weight: 500; font-size: 11px;
@@ -410,7 +453,23 @@
 
   <div id="statusbar">
     <span><span class="sb-dot" id="sb-dot"></span><span id="sb-left">正在初始化…</span></span>
-    <span class="right"><span id="sb-ver" style="opacity:.55">v2.1.1</span> · <span id="sb-right"></span></span>
+    <span class="right"><span id="sb-ver" style="opacity:.55">v2.2.0</span> · <span id="sb-right"></span></span>
+  </div>
+
+  <!-- v2.2.0 右键菜单（文件页） -->
+  <div id="ctx-menu" style="display:none"></div>
+
+  <!-- v2.2.0 输入弹窗（重命名/新建文件夹） -->
+  <div id="files-modal" style="display:none">
+    <div id="files-modal-box">
+      <div id="files-modal-title"></div>
+      <input id="files-modal-input" type="text" spellcheck="false">
+      <div id="files-modal-err"></div>
+      <div id="files-modal-btns">
+        <button id="files-modal-cancel">取消</button>
+        <button id="files-modal-ok">确定</button>
+      </div>
+    </div>
   </div>
 
 <script src="renderer.js"></script>

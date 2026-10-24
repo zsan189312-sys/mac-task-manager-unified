@@ -1113,3 +1113,81 @@ ipcMain.handle('win-download', async (e, { path: rp, isDir, size }) => {
     child.stdin.end(batch);
   });
 });
+
+// v2.2.0：文件操作（重命名/新建/复制/剪切粘贴/删除送回收站），统一走 SSH PS 脚本
+// 路径全部单引号转义内嵌；删除用 VisualBasic SendToRecycleBin（不直接删）
+function psQuote(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
+
+function winOpScript(op, a, b) {
+  const A = psQuote(a), B = psQuote(b || '');
+  let body = '';
+  if (op === 'rename') body = `Rename-Item -LiteralPath ${A} -NewName ${B}`;
+  else if (op === 'mkdir') body = `New-Item -ItemType Directory -Path ${A} | Out-Null`;
+  else if (op === 'copy') body = `Copy-Item -LiteralPath ${A} -Destination ${B} -Recurse -Force`;
+  else if (op === 'move') body = `Move-Item -LiteralPath ${A} -Destination ${B} -Force`;
+  else if (op === 'delete') body = `if(Test-Path -LiteralPath ${A} -PathType Container){[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(${A},'OnlyErrorDialogs','SendToRecycleBin')}else{[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(${A},'OnlyErrorDialogs','SendToRecycleBin')}`;
+  else return null;
+  return `$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[Text.Encoding]::UTF8
+try{
+Add-Type -AssemblyName Microsoft.VisualBasic
+${body}
+Write-Output '<<<TMU>>>'
+Write-Output '{"ok":true}'
+}catch{
+Write-Output '<<<TMU>>>'
+$m=($_.Exception.Message -replace '[\\r\\n]',' ')
+$o=[pscustomobject]@{ok=$false;err=$m}
+ConvertTo-Json $o -Compress
+}`;
+}
+
+ipcMain.handle('win-file-op', async (e, { op, a, b }) => {
+  if (currentHost.kind !== 'win') return { ok: false, err: '仅支持 Win 11 主机' };
+  if (!a || (op === 'rename' && !b)) return { ok: false, err: '参数缺失' };
+  const script = winOpScript(op, a, b);
+  if (!script) return { ok: false, err: '未知操作：' + op };
+  const r = await sshWin(currentHost.host, script, 20000);
+  const j = parseWinJson(r.out);
+  if (!j) return { ok: false, err: r.ok ? '操作无响应' : 'SSH 连接失败' };
+  return j;
+});
+
+// 删除确认（原生对话框，渲染进程无法用 confirm 阻塞）
+ipcMain.handle('confirm-dialog', async (e, { title, message, detail }) => {
+  const r = await dialog.showMessageBox(win, {
+    type: 'warning', buttons: ['确定', '取消'], defaultId: 1, cancelId: 1,
+    title, message, detail: detail || ''
+  });
+  return r.response === 0;
+});
+
+// 上传：Mac → Win11（选文件对话框 + sftp put，逐个传输）
+ipcMain.handle('win-upload', async (e, { dir }) => {
+  if (currentHost.kind !== 'win') return { ok: false, err: '仅支持 Win 11 主机' };
+  if (!dir) return { ok: false, err: '目标目录缺失' };
+  const r2 = await dialog.showOpenDialog(win, {
+    title: '选择要上传到 ' + currentHost.name + ' 的文件（可多选）',
+    defaultPath: app.getPath('downloads'),
+    properties: ['openFile', 'multiSelections']
+  });
+  if (r2.canceled || !r2.filePaths.length) return { ok: false, err: '已取消' };
+  const drive = dir.slice(0, 2), rest = dir.slice(2).replace(/\\/g, '/');
+  const remoteDir = '/' + drive + (rest.endsWith('/') ? rest : rest + '/');
+  const results = [];
+  for (let i = 0; i < r2.filePaths.length; i++) {
+    const lp = r2.filePaths[i];
+    const bn = path.basename(lp);
+    if (win && !win.isDestroyed()) win.webContents.send('dl-progress', { done: false, note: `⬆ 上传中 (${i + 1}/${r2.filePaths.length}) ${bn}` });
+    const batch = `put ${JSON.stringify(lp)} ${JSON.stringify(remoteDir + bn)}\n`;
+    const ok = await new Promise((resolve) => {
+      const child = spawn('sftp', [...sftpBaseArgs(currentHost.host), '-b', '-', currentHost.host]);
+      child.on('close', (code) => resolve(code === 0));
+      child.on('error', () => resolve(false));
+      child.stdin.end(batch);
+    });
+    results.push({ name: bn, ok });
+  }
+  const bad = results.filter(x => !x.ok).map(x => x.name);
+  return { ok: bad.length === 0, err: bad.length ? '上传失败：' + bad.join('、') : '', count: results.length - bad.length, total: results.length };
+});

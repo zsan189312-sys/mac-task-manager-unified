@@ -15,5 +15,9 @@ contextBridge.exposeInMainWorld('bridge', {
   // v2.1.0：Win11 文件浏览 + 下载到 Mac
   listWinDir: (p) => ipcRenderer.invoke('win-list-dir', p),
   downloadWin: (path, isDir, size) => ipcRenderer.invoke('win-download', { path, isDir, size }),
-  onDlProgress: (cb) => ipcRenderer.on('dl-progress', (e, d) => cb(d))
+  onDlProgress: (cb) => ipcRenderer.on('dl-progress', (e, d) => cb(d)),
+  // v2.2.0：右键菜单文件操作 + 上传
+  fileOp: (op, a, b) => ipcRenderer.invoke('win-file-op', { op, a, b }),
+  uploadWin: (dir) => ipcRenderer.invoke('win-upload', { dir }),
+  confirmDialog: (title, message, detail) => ipcRenderer.invoke('confirm-dialog', { title, message, detail })
 });
