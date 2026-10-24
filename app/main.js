@@ -631,31 +631,33 @@ function buildRemotePayload() {
 // 脚本一次性拉取 CPU/内存/磁盘/网络/卷/进程（WMI FormattedData 自带速率口径，免差分），
 // 只有进程 CPU% 需要在本侧按 TotalProcessorTime 差分计算。
 // 输出用 <<<TMU>>> 标记定位 JSON，规避 PowerShell 的 CLIXML 噪音。
-const WIN_PS = `$ErrorActionPreference='SilentlyContinue'; $ProgressPreference='SilentlyContinue'
+const WIN_PS = `$ErrorActionPreference='SilentlyContinue';$ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
-$os=gcim Win32_OperatingSystem; $cs=gcim Win32_ComputerSystem
-gcim Win32_PerfFormattedData_PerfOS_Processor|Out-Null
-Start-Sleep -Milliseconds 500
-$pf=gcim Win32_PerfFormattedData_PerfOS_Processor
-$pm=gcim Win32_PerfFormattedData_PerfOS_Memory
-$pd=gcim Win32_PerfFormattedData_PerfDisk_PhysicalDisk
-$pn=gcim Win32_PerfFormattedData_Tcpip_NetworkInterface
-$pp=gcim Win32_Processor
+sal g gcim
+$os=g Win32_OperatingSystem;$cs=g Win32_ComputerSystem
+g Win32_PerfFormattedData_PerfOS_Processor|Out-Null
+sleep -m 500
+$pf=g Win32_PerfFormattedData_PerfOS_Processor
+$pm=g Win32_PerfFormattedData_PerfOS_Memory
+$pd=g Win32_PerfFormattedData_PerfDisk_PhysicalDisk
+$pn=g Win32_PerfFormattedData_Tcpip_NetworkInterface
+$pp=g Win32_Processor|select -First 1
+$fq=@{};g Win32_PerfFormattedData_Counters_ProcessorInformation|?{$_.Name -match '^\\d+,\\d+$'}|%{$fq[$_.Name]=[double]$_.PercentProcessorPerformance}
 $na=Get-NetAdapterStatistics
-$ld=gcim Win32_LogicalDisk -Filter "DriveType=3"
-$pfu=gcim Win32_PageFileUsage
+$ld=g Win32_LogicalDisk -Filter "DriveType=3"
+$pfu=g Win32_PageFileUsage
 $t=$pf|?{$_.Name -eq '_Total'}
 $cl=@($pf|?{$_.Name -ne '_Total'}|sort{[int]$_.Name})
 $dt=$pd|?{$_.Name -eq '_Total'}|select -First 1
-$pr=@{};$pw=@{};gcim Win32_PerfFormattedData_PerfProc_Process|?{$_.Name -ne '_Total'}|%{$b=($_.Name -split '#')[0];if(!$pr.Contains($b)){$pr[$b]=0;$pw[$b]=0};$pr[$b]+=[long]$_.IOReadBytesPersec;$pw[$b]+=[long]$_.IOWriteBytesPersec}
-$procs=@(Get-Process|%{$c=0.0;try{$c=[double]$_.TotalProcessorTime.TotalSeconds}catch{};[pscustomobject]@{pid=$_.Id;name=$_.ProcessName;rss=[long]$_.WorkingSet64;cpuSec=[math]::Round($c,3);ioR=$pr[$_.ProcessName];ioW=$pw[$_.ProcessName]}})
-$disks=@($pd|?{$_.Name -ne '_Total'}|%{[pscustomobject]@{name=$_.Name;r=[long]$_.DiskReadBytesPersec;w=[long]$_.DiskWriteBytesPersec}})
-$volumes=@($ld|%{[pscustomobject]@{mount=$_.DeviceID;total=[long]$_.Size;free=[long]$_.FreeSpace}})
-$net=@($pn|%{$n=$_.Name;$cn=$n -replace '\\[R\\]','(R)';$a=@($na|?{$_.InterfaceDescription -eq $cn -or $_.Name -eq $n})[0];[pscustomobject]@{name=$n;rx=[long]$_.BytesReceivedPersec;tx=[long]$_.BytesSentPersec;rxTotal=$(if($a){[long]$a.ReceivedBytes}else{0});txTotal=$(if($a){[long]$a.SentBytes}else{0})}})
-$swT=@($pfu|measure AllocatedBaseSize -Sum).Sum; $swU=@($pfu|measure CurrentUsage -Sum).Sum
+$pr=@{};$pw=@{};g Win32_PerfFormattedData_PerfProc_Process|?{$_.Name -ne '_Total'}|%{$b=($_.Name -split '#')[0];if(!$pr.Contains($b)){$pr[$b]=0;$pw[$b]=0};$pr[$b]+=[long]$_.IOReadBytesPersec;$pw[$b]+=[long]$_.IOWriteBytesPersec}
+$procs=@(Get-Process|%{$c=0.0;try{$c=[double]$_.TotalProcessorTime.TotalSeconds}catch{};@{pid=$_.Id;name=$_.ProcessName;rss=[long]$_.WorkingSet64;cpuSec=[math]::Round($c,3);ioR=$pr[$_.ProcessName];ioW=$pw[$_.ProcessName]}})
+$disks=@($pd|?{$_.Name -ne '_Total'}|%{@{name=$_.Name;r=[long]$_.DiskReadBytesPersec;w=[long]$_.DiskWriteBytesPersec}})
+$volumes=@($ld|%{@{mount=$_.DeviceID;total=[long]$_.Size;free=[long]$_.FreeSpace}})
+$net=@($pn|%{$n=$_.Name;$cn=$n -replace '\\[R\\]','(R)';$a=@($na|?{$_.InterfaceDescription -eq $cn -or $_.Name -eq $n})[0];@{name=$n;rx=[long]$_.BytesReceivedPersec;tx=[long]$_.BytesSentPersec;rxTotal=$(if($a){[long]$a.ReceivedBytes}else{0});txTotal=$(if($a){[long]$a.SentBytes}else{0})}})
+$swT=@($pfu|measure AllocatedBaseSize -Sum).Sum;$swU=@($pfu|measure CurrentUsage -Sum).Sum
 $up=[long]([DateTimeOffset]::Now.Subtract($os.LastBootUpTime).TotalSeconds)
-$o=[pscustomobject]@{sys=[pscustomobject]@{hostname=$cs.DNSHostname;os=($os.Caption+' '+$os.Version).Trim();model=($cs.Manufacturer+' '+$cs.Model).Trim();cores=$cs.NumberOfLogicalProcessors;fmax=[int](@($pp|select -First 1).MaxClockSpeed);fcur=[int](@($pp|select -First 1).CurrentClockSpeed)};uptime=$up;cpu_total=[int]$t.PercentProcessorTime;cpu_user=[int]$t.PercentUserTime;cpu_sys=[int]$t.PercentPrivilegedTime;cpu_idle=[int]$t.PercentIdleTime;cores=$cl|%{[int]$_.PercentProcessorTime};mem=[pscustomobject]@{total=[long]($os.TotalVisibleMemorySize*1KB);avail=[long]$pm.AvailableBytes;cached=[long]($pm.StandbyCacheCoreBytes+$pm.StandbyCacheNormalPriorityBytes+$pm.StandbyCacheReserveBytes);commit=[long]$pm.CommittedBytes};swap=[pscustomobject]@{total=[long]($swT*1MB);used=[long]($swU*1MB)};disk=$disks;disk_total_r=[long]$dt.DiskReadBytesPersec;disk_total_w=[long]$dt.DiskWriteBytesPersec;tps=[int]$dt.DiskTransfersPersec;volumes=$volumes;net=$net;procs=$procs}
-Write-Output '<<<TMU>>>'
+$o=@{sys=@{hostname=$cs.DNSHostname;os=($os.Caption+' '+$os.Version).Trim();model=($cs.Manufacturer+' '+$cs.Model).Trim();cores=$cs.NumberOfLogicalProcessors;fmax=[int]$pp.MaxClockSpeed;fcur=[int]$pp.CurrentClockSpeed;perf=$fq};uptime=$up;cpu_total=[int]$t.PercentProcessorTime;cpu_user=[int]$t.PercentUserTime;cpu_sys=[int]$t.PercentPrivilegedTime;cpu_idle=[int]$t.PercentIdleTime;cores=$cl|%{[int]$_.PercentProcessorTime};mem=@{total=[long]($os.TotalVisibleMemorySize*1KB);avail=[long]$pm.AvailableBytes;cached=[long]($pm.StandbyCacheCoreBytes+$pm.StandbyCacheNormalPriorityBytes+$pm.StandbyCacheReserveBytes);commit=[long]$pm.CommittedBytes};swap=@{total=[long]($swT*1MB);used=[long]($swU*1MB)};disk=$disks;disk_total_r=[long]$dt.DiskReadBytesPersec;disk_total_w=[long]$dt.DiskWriteBytesPersec;tps=[int]$dt.DiskTransfersPersec;volumes=$volumes;net=$net;procs=$procs}
+echo '<<<TMU>>>'
 ConvertTo-Json $o -Compress -Depth 4`;
 
 // GPU 采集走独立短脚本（与主脚本并行、错峰发起）：nvidia-smi 一次拿到
@@ -760,26 +762,37 @@ function buildWinPayload() {
       ok: wOk, rtt: wRtt, bytes: wBytes, polls: polls, interval: cfg.intervalMs,
       host: currentHost.host, mode: 'SSH + PowerShell'
     },
-    // v1.2.5：CPU 频率接通——LHM 传感器服务（WinRing0 读 AMD SMU）给逐物理核有效时钟，
-    // 6 物理核映射到 12 逻辑核：0–5 = 物理核 1–6，6–11 = 对应超线程兄弟（同频）
+    // v2.2.2：每轮按逻辑核选择 LHM → perf 动态频率 → 标称兜底。
+    // LHM 的 6 个物理核对应逻辑核 0–5，6–11 为 HT 兄弟，保留缺失核的位置。
     cpu: (() => {
-      const clocks = [];
-      for (let i = 1; i <= 32 && clocks.length < 8; i++) {
-        const c = (wSensors || []).find(x => x.hw === 'Cpu' && x.type === 'Clock' && x.name === 'Core #' + i);
-        if (c && typeof c.val === 'number' && c.val > 100) clocks.push(c.val);
-      }
-      const nLog = sys.cores || (s.cores || []).length;
-      // v2.2.1：LHM 传感器 Clock 偶发 NaN（WinRing0/SMU 读数失效）→ 频率置空。
-      // 兜底：传感器无有效值（或不足）时，用 WMI CurrentClockSpeed 填满所有逻辑核。
-      const wmiFreq = (sys.fcur > 100) ? sys.fcur : 0;
-      const effClocks = clocks.length ? clocks : (wmiFreq ? [wmiFreq] : []);
-      const freq = effClocks.length
-        ? Array.from({ length: nLog || effClocks.length }, (_, i) => effClocks[i % effClocks.length])
-        : [];
+      const nLog = sys.cores || (s.cores || []).length || 0;
+      const nPhys = Math.ceil(nLog / 2);
+      const nominal = Number.isFinite(sys.fcur) && sys.fcur > 100 ? sys.fcur : 0;
+      // 实例名的逗号后是逻辑处理器编号；排除 _Total / 组汇总，避免字符串排序 10 < 2。
+      const perf = new Map(Object.entries(sys.perf || {})
+        .filter(([name]) => /^\d+,\d+$/.test(name))
+        .map(([name, value]) => [Number(name.split(',')[1]), value]));
+      const sources = [];
+      const freq = Array.from({ length: nLog }, (_, i) => {
+        const clock = (wSensors || []).find(x => x.hw === 'Cpu' && x.type === 'Clock'
+          && x.name === 'Core #' + (i % nPhys + 1));
+        if (clock && Number.isFinite(clock.val) && clock.val > 100) {
+          sources.push('lhm');
+          return clock.val;
+        }
+        const pct = perf.get(i);
+        if (nominal && Number.isFinite(pct) && pct > 0) {
+          sources.push('perf');
+          return nominal * pct / 100;
+        }
+        sources.push(nominal ? 'nominal' : 'unavailable');
+        return nominal;
+      });
       return {
         cores: s.cores || [], count: nLog,
         total: s.cpu_total || 0, user: s.cpu_user || 0, sys: s.cpu_sys || 0, idle: s.cpu_idle || 0, iowait: 0,
-        freq, freqMax: effClocks.length ? Math.max(...effClocks) : 0, coreTypes: [], pUsage: null, eUsage: null, freqP: null, freqE: null,
+        freq, freqMax: freq.length ? Math.max(...freq) : 0, freqSources: sources,
+        coreTypes: [], pUsage: null, eUsage: null, freqP: null, freqE: null,
         load: null, model: sys.model || ''
       };
     })(),

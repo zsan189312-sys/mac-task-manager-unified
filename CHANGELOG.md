@@ -1,5 +1,15 @@
 # 更新日志
 
+## v2.2.2（2026-10-25）
+
+### 修复：Win11 CPU 频率使用实时动态计数器
+- WIN_PS 每轮采集 `Win32_PerfFormattedData_Counters_ProcessorInformation` 各逻辑处理器的 `PercentProcessorPerformance`，以 `Win32_Processor.CurrentClockSpeed` 为标称频率，按 `百分比 × 标称 MHz / 100` 计算当轮频率。
+- 每个逻辑核取数优先级：有效 LHM Clock（>100 MHz，物理核与 HT 兄弟同频）→ 对应 perf 动态值 → 两者均不可用时才使用标称兜底；NaN/Infinity/缺失值不作为有效采样，缺失核不再导致后续核错位。
+- 频率卡片、逐核频率与 `freqMax` 均由当轮频率数组生成；新增逐核来源字段，便于区分实时数据与降级兜底。
+- 用 PowerShell 短别名压缩主采集脚本，保留原有数据字段，控制 EncodedCommand 长度。
+- 同步 package 与状态栏版本号为 v2.2.2（修复原状态栏仍显示 v2.2.0）。
+- 验证：主脚本 base64 7768 字符、PowerShell 命令 7822 字符；Win11 原脚本实采 12 个 perf 实例，Node 模拟验证优先级/HT 映射/NaN 与缺失核。部署重启后两次 UI 平均频率 3.94→4.10 GHz，当轮最大 4.10→4.14 GHz。
+
 ## v2.2.1（2026-10-25）
 
 ### 修复：Windows 11 CPU 频率偶发消失
