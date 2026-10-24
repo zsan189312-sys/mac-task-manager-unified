@@ -1,5 +1,11 @@
 # 更新日志
 
+## v2.2.1（2026-10-25）
+
+### 修复：Windows 11 CPU 频率偶发消失
+- 根因：Win11 侧 LibreHardwareMonitor 传感器服务的 CPU `Clock` 项偶发返回 `NaN`（WinRing0/SMU 读数失效，与 App 代码无关），原判定 `val>100` 不成立 → 频率数组被置空。
+- 兜底：WIN_PS 新增 `Win32_Processor` 的 `CurrentClockSpeed/MaxClockSpeed`；`buildWinPayload` 在传感器无有效时钟值时，用 WMI `CurrentClockSpeed` 填满全部逻辑核，频率卡片不再空白。
+
 ## v2.2.0（2026-10-25）
 
 ### 新增：文件页右键菜单 + 文件操作 + 上传

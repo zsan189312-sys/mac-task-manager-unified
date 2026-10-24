@@ -640,6 +640,7 @@ $pf=gcim Win32_PerfFormattedData_PerfOS_Processor
 $pm=gcim Win32_PerfFormattedData_PerfOS_Memory
 $pd=gcim Win32_PerfFormattedData_PerfDisk_PhysicalDisk
 $pn=gcim Win32_PerfFormattedData_Tcpip_NetworkInterface
+$pp=gcim Win32_Processor
 $na=Get-NetAdapterStatistics
 $ld=gcim Win32_LogicalDisk -Filter "DriveType=3"
 $pfu=gcim Win32_PageFileUsage
@@ -653,7 +654,7 @@ $volumes=@($ld|%{[pscustomobject]@{mount=$_.DeviceID;total=[long]$_.Size;free=[l
 $net=@($pn|%{$n=$_.Name;$cn=$n -replace '\\[R\\]','(R)';$a=@($na|?{$_.InterfaceDescription -eq $cn -or $_.Name -eq $n})[0];[pscustomobject]@{name=$n;rx=[long]$_.BytesReceivedPersec;tx=[long]$_.BytesSentPersec;rxTotal=$(if($a){[long]$a.ReceivedBytes}else{0});txTotal=$(if($a){[long]$a.SentBytes}else{0})}})
 $swT=@($pfu|measure AllocatedBaseSize -Sum).Sum; $swU=@($pfu|measure CurrentUsage -Sum).Sum
 $up=[long]([DateTimeOffset]::Now.Subtract($os.LastBootUpTime).TotalSeconds)
-$o=[pscustomobject]@{sys=[pscustomobject]@{hostname=$cs.DNSHostname;os=($os.Caption+' '+$os.Version).Trim();model=($cs.Manufacturer+' '+$cs.Model).Trim();cores=$cs.NumberOfLogicalProcessors};uptime=$up;cpu_total=[int]$t.PercentProcessorTime;cpu_user=[int]$t.PercentUserTime;cpu_sys=[int]$t.PercentPrivilegedTime;cpu_idle=[int]$t.PercentIdleTime;cores=$cl|%{[int]$_.PercentProcessorTime};mem=[pscustomobject]@{total=[long]($os.TotalVisibleMemorySize*1KB);avail=[long]$pm.AvailableBytes;cached=[long]($pm.StandbyCacheCoreBytes+$pm.StandbyCacheNormalPriorityBytes+$pm.StandbyCacheReserveBytes);commit=[long]$pm.CommittedBytes};swap=[pscustomobject]@{total=[long]($swT*1MB);used=[long]($swU*1MB)};disk=$disks;disk_total_r=[long]$dt.DiskReadBytesPersec;disk_total_w=[long]$dt.DiskWriteBytesPersec;tps=[int]$dt.DiskTransfersPersec;volumes=$volumes;net=$net;procs=$procs}
+$o=[pscustomobject]@{sys=[pscustomobject]@{hostname=$cs.DNSHostname;os=($os.Caption+' '+$os.Version).Trim();model=($cs.Manufacturer+' '+$cs.Model).Trim();cores=$cs.NumberOfLogicalProcessors;fmax=[int](@($pp|select -First 1).MaxClockSpeed);fcur=[int](@($pp|select -First 1).CurrentClockSpeed)};uptime=$up;cpu_total=[int]$t.PercentProcessorTime;cpu_user=[int]$t.PercentUserTime;cpu_sys=[int]$t.PercentPrivilegedTime;cpu_idle=[int]$t.PercentIdleTime;cores=$cl|%{[int]$_.PercentProcessorTime};mem=[pscustomobject]@{total=[long]($os.TotalVisibleMemorySize*1KB);avail=[long]$pm.AvailableBytes;cached=[long]($pm.StandbyCacheCoreBytes+$pm.StandbyCacheNormalPriorityBytes+$pm.StandbyCacheReserveBytes);commit=[long]$pm.CommittedBytes};swap=[pscustomobject]@{total=[long]($swT*1MB);used=[long]($swU*1MB)};disk=$disks;disk_total_r=[long]$dt.DiskReadBytesPersec;disk_total_w=[long]$dt.DiskWriteBytesPersec;tps=[int]$dt.DiskTransfersPersec;volumes=$volumes;net=$net;procs=$procs}
 Write-Output '<<<TMU>>>'
 ConvertTo-Json $o -Compress -Depth 4`;
 
@@ -768,13 +769,17 @@ function buildWinPayload() {
         if (c && typeof c.val === 'number' && c.val > 100) clocks.push(c.val);
       }
       const nLog = sys.cores || (s.cores || []).length;
-      const freq = clocks.length
-        ? Array.from({ length: nLog || clocks.length }, (_, i) => clocks[i % clocks.length])
+      // v2.2.1：LHM 传感器 Clock 偶发 NaN（WinRing0/SMU 读数失效）→ 频率置空。
+      // 兜底：传感器无有效值（或不足）时，用 WMI CurrentClockSpeed 填满所有逻辑核。
+      const wmiFreq = (sys.fcur > 100) ? sys.fcur : 0;
+      const effClocks = clocks.length ? clocks : (wmiFreq ? [wmiFreq] : []);
+      const freq = effClocks.length
+        ? Array.from({ length: nLog || effClocks.length }, (_, i) => effClocks[i % effClocks.length])
         : [];
       return {
         cores: s.cores || [], count: nLog,
         total: s.cpu_total || 0, user: s.cpu_user || 0, sys: s.cpu_sys || 0, idle: s.cpu_idle || 0, iowait: 0,
-        freq, freqMax: clocks.length ? Math.max(...clocks) : 0, coreTypes: [], pUsage: null, eUsage: null, freqP: null, freqE: null,
+        freq, freqMax: effClocks.length ? Math.max(...effClocks) : 0, coreTypes: [], pUsage: null, eUsage: null, freqP: null, freqE: null,
         load: null, model: sys.model || ''
       };
     })(),
