@@ -559,14 +559,24 @@ const detailDefs = {
           <td style="text-align:right;color:var(--amber)">${fmtRate(v.w)}</td>
         </tr>`).join('') || '<tr><td colspan="3" class="empty-hint">无块设备</td></tr>';
       const vt = document.getElementById('vol-tbody');
-      if (vt) vt.innerHTML = (d.disk.volumes || []).map(v => `
-        <tr>
-          <td>${esc(v.mount)}</td>
+      if (vt) {
+        const winHost = d.host.kind === 'win';
+        vt.innerHTML = (d.disk.volumes || []).map(v => {
+          const cls = winHost ? ' class="vol-row" data-root="' + esc(v.mount + '\\') + '"' : '';
+          const hint = winHost ? ' <span style="color:var(--text-3);font-size:11px">› 浏览文件</span>' : '';
+          return `
+        <tr${cls}>
+          <td>${esc(v.mount)}${hint}</td>
           <td>${fmtSize(v.used)} / ${fmtSize(v.total)}
             <span class="usage-track"><span class="usage-fill" style="width:${(v.used / v.total * 100).toFixed(0)}%"></span></span>
           </td>
           <td>可用 ${fmtSize(v.avail)}</td>
-        </tr>`).join('') || '<tr><td colspan="3" class="empty-hint">无数据</td></tr>';
+        </tr>`;
+        }).join('') || '<tr><td colspan="3" class="empty-hint">无数据</td></tr>';
+        [...vt.querySelectorAll('tr.vol-row')].forEach(tr => {
+          tr.onclick = () => { openDir(tr.dataset.root); switchView('files'); };
+        });
+      }
     },
     meta(d) {
       return d.host.kind === 'local'
@@ -985,12 +995,158 @@ function switchView(v) {
   document.getElementById('perf-view').classList.toggle('active', v === 'perf');
   document.getElementById('procs-view').classList.toggle('active', v === 'procs');
   document.getElementById('docker-view').classList.toggle('active', v === 'docker');
+  document.getElementById('files-view').classList.toggle('active', v === 'files');
   try { window.bridge.setView(v); } catch (e) { }
   if (v === 'perf' && latest) tickDetail(true);
   if (v === 'procs' && latest) renderProcs(latest);
   if (v === 'docker' && latest) renderDocker(latest);
+  if (v === 'files') { if (!filesPath) openDir('C:\\'); else openDir(filesPath, true); }
 }
 document.querySelectorAll('.tab').forEach(t => { t.onclick = () => switchView(t.dataset.view); });
+
+// ---------- v2.1.0 文件浏览（Win 11 · SSH 采集，免装 agent） ----------
+let filesPath = null;            // 当前目录，如 'C:\Users\xx'
+let filesItems = [];
+let filesDrive = null;           // { total, free }（仅盘根时有值）
+let filesSel = null;             // 选中项 { name, isDir, size, path }
+let filesBusy = false;           // 列目录请求进行中
+let dlActive = false;            // 下载进行中
+
+function winParentDir(p) {
+  const s = p.replace(/\\+$/, '');
+  if (s.length <= 2) return null;           // 已是盘根 C:\
+  const i = s.lastIndexOf('\\');
+  if (i < 2) return s.slice(0, 2) + '\\';   // 'C:\Users' → 'C:\'
+  return s.slice(0, i);
+}
+
+function winJoin(a, b) { return a.endsWith('\\') ? a + b : a + '\\' + b; }
+
+function renderFilesCrumbs(p) {
+  const box = document.getElementById('files-crumbs');
+  const parts = [];
+  const re = /^(.:)(?:\\(.*))?$/s.exec(p);
+  if (!re) { box.textContent = p; return; }
+  parts.push({ label: re[1] + '\\', path: re[1] + '\\' });
+  if (re[2]) {
+    let acc = re[1] + '\\';
+    re[2].split('\\').filter(Boolean).forEach(seg => { acc = winJoin(acc, seg); parts.push({ label: seg, path: acc }); });
+  }
+  box.innerHTML = parts.map((x, i) =>
+    `<span class="crumb${i === parts.length - 1 ? ' current' : ''}" data-path="${esc(x.path)}">${esc(x.label)}</span>` +
+    (i < parts.length - 1 ? '<span class="crumb-sep">›</span>' : '')
+  ).join('');
+  [...box.querySelectorAll('.crumb')].forEach(c => { c.onclick = () => openDir(c.dataset.path); });
+  box.scrollLeft = box.scrollWidth;
+}
+
+function renderFilesRows() {
+  const tb = document.getElementById('files-tbody');
+  if (!filesItems.length) {
+    tb.innerHTML = '<tr class="disabled-row"><td colspan="3" class="empty-hint">空目录</td></tr>';
+    return;
+  }
+  tb.innerHTML = filesItems.map((it, idx) => {
+    const icon = it.d ? '📁' : '📄';
+    const size = it.d ? '—' : fmtSize(it.l || 0);
+    return `<tr data-idx="${idx}">
+      <td><span style="margin-right:7px">${icon}</span>${esc(it.n)}</td>
+      <td class="th-num" style="color:${it.d ? 'var(--text-3)' : 'var(--text)'}">${size}</td>
+      <td class="th-num" style="color:var(--text-3)">${esc(it.m || '')}</td>
+      <td style="width:40px"><span class="f-act" data-idx="${idx}" title="下载到 Mac">⬇</span></td>
+    </tr>`;
+  }).join('');
+  // 文件夹单击进入 / 文件单击选中
+  [...tb.querySelectorAll('tr[data-idx]')].forEach(tr => {
+    const it = filesItems[+tr.dataset.idx];
+    tr.onclick = () => {
+      if (it.d) { openDir(winJoin(filesPath, it.n)); return; }
+      filesSel = { name: it.n, isDir: false, size: it.l || 0, path: winJoin(filesPath, it.n) };
+      [...tb.querySelectorAll('tr')].forEach(r => r.classList.remove('selected'));
+      tr.classList.add('selected');
+      syncFilesButtons();
+    };
+    tr.ondblclick = () => { if (!it.d) startDownload({ name: it.n, isDir: false, size: it.l || 0, path: winJoin(filesPath, it.n) }); };
+  });
+  // 行尾 ⬇ 按钮：文件/目录都可下载（目录单击进入，⬇ 负责整目录下载）
+  [...tb.querySelectorAll('.f-act')].forEach(sp => {
+    sp.onclick = (ev) => {
+      ev.stopPropagation();
+      const it = filesItems[+sp.dataset.idx];
+      startDownload({ name: it.n, isDir: !!it.d, size: it.l || 0, path: winJoin(filesPath, it.n) });
+    };
+  });
+}
+
+function syncFilesButtons() {
+  document.getElementById('files-download').disabled = !(filesSel && !dlActive);
+  document.getElementById('files-up').disabled = !filesPath || winParentDir(filesPath) === null;
+}
+
+function setFilesStatus(html) { document.getElementById('files-status').innerHTML = html; }
+
+function filesInfoLine() {
+  const n = filesItems.length;
+  let s = `${filesPath} · ${n} 项`;
+  if (filesDrive && filesDrive.total) s += ` · 可用 ${fmtSize(filesDrive.free)} / 共 ${fmtSize(filesDrive.total)}`;
+  s += '　（文件夹单击进入 · 文件单击选中 · ⬇ 或双击下载）';
+  return s;
+}
+
+async function openDir(p, keepOld) {
+  if (filesBusy) return;
+  if (!latest || latest.host.kind !== 'win') { setFilesStatus('文件浏览仅支持 Win 11 主机'); return; }
+  filesBusy = true; filesSel = null;
+  syncFilesButtons();
+  if (!keepOld) setFilesStatus(`<span style="opacity:.7">读取 ${esc(p)} …</span>`);
+  const t0 = Date.now();
+  let r;
+  try { r = await window.bridge.listWinDir(p); } catch (err) { r = { ok: false, err: err.message }; }
+  filesBusy = false;
+  if (currentView !== 'files') return;
+  if (!r || !r.ok) {
+    setFilesStatus(`⚠ ${esc((r && r.err) || '读取失败')} — ${esc(p)}`);
+    syncFilesButtons();
+    return;
+  }
+  filesPath = p;
+  filesItems = r.items || [];
+  filesDrive = r.total ? { total: r.total, free: r.free } : null;
+  renderFilesCrumbs(p);
+  renderFilesRows();
+  setFilesStatus(esc(filesInfoLine()) + ` · ${Date.now() - t0} ms`);
+  syncFilesButtons();
+}
+
+async function startDownload(sel) {
+  if (dlActive) return;
+  dlActive = true; syncFilesButtons();
+  setFilesStatus(`⬇ ${esc(sel.isDir ? '[目录] ' : '')}${esc(sel.name)} — 准备传输…（在弹出的窗口中选择保存位置）`);
+  let r;
+  try { r = await window.bridge.downloadWin(sel.path, sel.isDir, sel.size); }
+  catch (err) { r = { ok: false, err: err.message }; }
+  dlActive = false; syncFilesButtons();
+  if (!r) { setFilesStatus('⚠ 未知错误'); return; }
+  if (r.ok) setFilesStatus(`✅ 已保存到 ${esc(r.dest)}`);
+  else if (r.err === '已取消') setFilesStatus(esc(filesInfoLine()));
+  else setFilesStatus(`⚠ 下载失败：${esc(r.err || '未知错误')}`);
+}
+
+window.bridge.onDlProgress((d) => {
+  if (d.done) return; // 结束态由 startDownload 统一处理
+  let s;
+  if (d.total) {
+    const pct = Math.min(100, d.transferred / d.total * 100).toFixed(0);
+    s = `⬇ 传输中 ${pct}% · ${fmtSize(d.transferred)} / ${fmtSize(d.total)} <span class="dl-bar"><span class="dl-fill" style="width:${pct}%"></span></span>`;
+  } else {
+    s = `⬇ 传输中 · 已传 ${fmtSize(d.transferred)}（目录，总量未知）`;
+  }
+  setFilesStatus(s);
+});
+
+document.getElementById('files-up').onclick = () => { const p = winParentDir(filesPath); if (p) openDir(p); };
+document.getElementById('files-refresh').onclick = () => { if (filesPath) openDir(filesPath); };
+document.getElementById('files-download').onclick = () => { if (filesSel) startDownload(filesSel); };
 function selectCard(id) {
   if (!detailDefs[id]) return;
   activeCard = id; bodyBuilt = false;
@@ -1028,6 +1184,7 @@ window.addEventListener('keydown', e => {
   if (e.metaKey && e.key === '1') { e.preventDefault(); switchView('perf'); }
   else if (e.metaKey && e.key === '2') { e.preventDefault(); switchView('procs'); }
   else if (e.metaKey && e.key === '3') { e.preventDefault(); if (latest && latest.host.kind !== 'local') switchView('docker'); }
+  else if (e.metaKey && e.key === '4') { e.preventDefault(); if (latest && latest.host.kind === 'win') switchView('files'); }
   else if (e.key === 'Escape') {
     const s = document.getElementById('proc-search');
     if (s.value) { s.value = ''; procQuery = ''; if (latest) renderProcs(latest); }
@@ -1100,11 +1257,14 @@ window.bridge.onStats((d) => {
   // 顶栏主机信息
   document.getElementById('osinfo').innerHTML =
     `${esc(d.sys.hostname || d.host.name)} · ${esc(d.sys.os || (d.host.kind === 'local' ? 'macOS' : d.host.kind === 'win' ? 'Windows' : 'Linux'))} · ${esc(d.cpu.model || '')}`;
-  // 容器页：仅远程 Linux 主机可用
+  // 容器页：仅远程 Linux 主机可用；文件页：仅 Win 11 可用
   const noDocker = d.host.kind === 'local' || d.host.kind === 'win';
   const dockerTab = document.getElementById('tab-docker');
   dockerTab.style.display = noDocker ? 'none' : '';
   if (noDocker && currentView === 'docker') switchView('perf');
+  const noFiles = d.host.kind !== 'win';
+  document.getElementById('tab-files').style.display = noFiles ? 'none' : '';
+  if (noFiles && currentView === 'files') switchView('perf');
 
   // 状态栏
   const dot = document.getElementById('sb-dot');

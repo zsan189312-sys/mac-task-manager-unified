@@ -1031,3 +1031,85 @@ ipcMain.handle('kill-process', async (e, rawPid) => {
     return res.ok ? `已结束远程进程 ${pid}` : '远程结束失败';
   }
 });
+
+// ---------- v2.1.0：Win11 文件浏览 + 下载到 Mac（SSH + sftp，免装 agent） ----------
+// 列目录：按需生成 PowerShell 脚本（路径内嵌，单引号转义），复用 sshWin 通道
+function winListScript(dir) {
+  const p = String(dir).replace(/'/g, "''");
+  return `$ErrorActionPreference='SilentlyContinue'
+[Console]::OutputEncoding=[Text.Encoding]::UTF8
+$p='${p}'
+$drv=if($p -match '^([A-Za-z]:)'){$Matches[1]}else{$null}
+$di=$null
+if($drv){$di=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$drv'"}
+$ok=Test-Path -LiteralPath $p
+$it=@()
+if($ok){$it=@(Get-ChildItem -LiteralPath $p -Force | Sort-Object @{Expression={[int]$_.PSIsContainer};Descending=$true},Name | ForEach-Object{[pscustomobject]@{n=$_.Name;d=$(if($_.PSIsContainer){1}else{0});l=[long]$_.Length;m=$_.LastWriteTime.ToString('yyyy-MM-dd HH:mm')}})}
+$o=[pscustomobject]@{ok=$ok;err=$(if($ok){''}else{'路径不存在或不可访问'});total=$(if($di){[long]$di.Size}else{0});free=$(if($di){[long]$di.FreeSpace}else{0});items=$it}
+Write-Output '<<<TMU>>>'
+ConvertTo-Json $o -Compress -Depth 3`;
+}
+
+function sftpBaseArgs(alias) {
+  return ['-o', 'ControlMaster=auto', '-o', 'ControlPath=/tmp/tmu-win-' + alias + '.sock',
+    '-o', 'ControlPersist=300', '-o', 'ConnectTimeout=10', '-o', 'BatchMode=yes'];
+}
+
+ipcMain.handle('win-list-dir', async (e, dir) => {
+  if (currentHost.kind !== 'win') return { ok: false, err: '文件浏览仅支持 Win 11 主机' };
+  const r = await sshWin(currentHost.host, winListScript(dir), 15000);
+  const j = parseWinJson(r.out);
+  if (!j) return { ok: false, err: r.ok ? '输出解析失败' : 'SSH 连接失败' };
+  return j;
+});
+
+// 下载：sftp batch 模式（路径不经过远端 shell，中文/空格安全），进度轮询本地文件大小
+ipcMain.handle('win-download', async (e, { path: rp, isDir, size }) => {
+  if (currentHost.kind !== 'win') return { ok: false, err: '仅支持 Win 11 主机' };
+  if (!rp || /["\r\n]/.test(rp)) return { ok: false, err: '路径为空或含不支持的字符' };
+  const name = rp.split(/[\\/]/).filter(Boolean).pop() || 'download';
+  let dest;
+  if (isDir) {
+    const r2 = await dialog.showOpenDialog(win, {
+      title: '选择保存位置（将创建同名文件夹）',
+      defaultPath: app.getPath('downloads'),
+      properties: ['openDirectory', 'createDirectory']
+    });
+    if (r2.canceled || !r2.filePaths[0]) return { ok: false, err: '已取消' };
+    dest = path.join(r2.filePaths[0], name);
+    if (fs.existsSync(dest)) return { ok: false, err: '目标已存在：' + dest };
+  } else {
+    const r2 = await dialog.showSaveDialog(win, {
+      title: '保存到 MacBook',
+      defaultPath: path.join(app.getPath('downloads'), name)
+    });
+    if (r2.canceled || !r2.filePath) return { ok: false, err: '已取消' };
+    dest = r2.filePath;
+  }
+  // Windows OpenSSH 的 sftp 绝对路径形式是 /C:/...
+  const drive = rp.slice(0, 2); // "C:"
+  const rest = rp.slice(2).replace(/\\/g, '/');
+  const remotePath = '/' + drive + rest;
+  const batch = (isDir ? 'get -r ' : 'get ') + `"${remotePath}" "${dest}"\n`;
+  return await new Promise((resolve) => {
+    const child = spawn('sftp', [...sftpBaseArgs(currentHost.host), '-b', '-', currentHost.host]);
+    let finished = false, lastSent = 0;
+    const done = (r) => { if (finished) return; finished = true; clearInterval(tick); resolve(r); };
+    const tick = setInterval(() => {
+      try {
+        const st = fs.statSync(dest);
+        if (st.size !== lastSent) {
+          lastSent = st.size;
+          if (win && !win.isDestroyed()) win.webContents.send('dl-progress', { transferred: st.size, total: isDir ? 0 : (size || 0), done: false });
+        }
+      } catch (err) { }
+    }, 400);
+    child.on('close', (code) => {
+      const ok = code === 0 && fs.existsSync(dest);
+      if (win && !win.isDestroyed()) win.webContents.send('dl-progress', { done: true, ok });
+      done(ok ? { ok: true, dest } : { ok: false, err: 'sftp 传输失败（退出码 ' + code + '）' });
+    });
+    child.on('error', (err) => done({ ok: false, err: 'sftp 启动失败：' + err.message }));
+    child.stdin.end(batch);
+  });
+});

@@ -11,5 +11,9 @@ contextBridge.exposeInMainWorld('bridge', {
   getHosts: () => ipcRenderer.invoke('get-hosts'),
   setHost: (id) => ipcRenderer.invoke('set-host', id),
   addHost: (h) => ipcRenderer.invoke('add-host', h),
-  removeHost: (id) => ipcRenderer.invoke('remove-host', id)
+  removeHost: (id) => ipcRenderer.invoke('remove-host', id),
+  // v2.1.0：Win11 文件浏览 + 下载到 Mac
+  listWinDir: (p) => ipcRenderer.invoke('win-list-dir', p),
+  downloadWin: (path, isDir, size) => ipcRenderer.invoke('win-download', { path, isDir, size }),
+  onDlProgress: (cb) => ipcRenderer.on('dl-progress', (e, d) => cb(d))
 });
