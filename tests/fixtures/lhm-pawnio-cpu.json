@@ -1,0 +1,170 @@
+[
+  {
+    "hw": "Cpu",
+    "name": "Package",
+    "type": "Power",
+    "val": 36.404
+  },
+  {
+    "hw": "Cpu",
+    "name": "Cores (Average)",
+    "type": "Clock",
+    "val": 4200
+  },
+  {
+    "hw": "Cpu",
+    "name": "Cores (Average Effective)",
+    "type": "Clock",
+    "val": 454
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #1",
+    "type": "Clock",
+    "val": 4200
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #1 (Effective)",
+    "type": "Clock",
+    "val": 758.5
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #1 (SMU)",
+    "type": "Power",
+    "val": 3.315
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #2",
+    "type": "Clock",
+    "val": 4200
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #2 (Effective)",
+    "type": "Clock",
+    "val": 882
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #2 (SMU)",
+    "type": "Power",
+    "val": 3.994
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #3",
+    "type": "Clock",
+    "val": 4200
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #3 (Effective)",
+    "type": "Clock",
+    "val": 351.5
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #3 (SMU)",
+    "type": "Power",
+    "val": 2.187
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #4",
+    "type": "Clock",
+    "val": 4200
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #4 (Effective)",
+    "type": "Clock",
+    "val": 245
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #4 (SMU)",
+    "type": "Power",
+    "val": 1.935
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #5",
+    "type": "Clock",
+    "val": 4200
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #5 (Effective)",
+    "type": "Clock",
+    "val": 247
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #5 (SMU)",
+    "type": "Power",
+    "val": 1.958
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #6",
+    "type": "Clock",
+    "val": 4200
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #6 (Effective)",
+    "type": "Clock",
+    "val": 239
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core #6 (SMU)",
+    "type": "Power",
+    "val": 1.934
+  },
+  {
+    "hw": "Cpu",
+    "name": "Core (Tctl/Tdie)",
+    "type": "Temperature",
+    "val": 62.125
+  },
+  {
+    "hw": "Cpu",
+    "name": "CCD1 (Tdie)",
+    "type": "Temperature",
+    "val": 51.5
+  },
+  {
+    "hw": "Cpu",
+    "name": "Bus Speed",
+    "type": "Clock",
+    "val": 100
+  },
+  {
+    "hw": "Cpu",
+    "name": "Fabric",
+    "type": "Clock",
+    "val": 1467
+  },
+  {
+    "hw": "Cpu",
+    "name": "Uncore",
+    "type": "Clock",
+    "val": 1467
+  },
+  {
+    "hw": "Cpu",
+    "name": "Memory",
+    "type": "Clock",
+    "val": 1467
+  },
+  {
+    "hw": "Cpu",
+    "name": "SoC",
+    "type": "Temperature",
+    "val": 39.082
+  }
+]

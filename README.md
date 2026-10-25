@@ -4,9 +4,9 @@
 
 ## 下载（免编译）
 
-👉 [Releases 页 → v2.2.4](https://github.com/zsan189312-sys/mac-task-manager-unified/releases/tag/v2.2.4)
+👉 [Releases 页 → v2.2.5](https://github.com/zsan189312-sys/mac-task-manager-unified/releases/tag/v2.2.5)
 
-下载 `TaskManager-Unified-v2.2.4-macOS-arm64.zip`（约 100 MiB，Apple Silicon / M 系列），解压后把「任务管理器-统一版.app」拖进「应用程序」，**首次打开需右键 → 打开**（未做 Apple 公证，右键打开一次后即可正常双击）。
+下载 `TaskManager-Unified-v2.2.5-macOS-arm64.zip`（约 100 MiB，Apple Silicon / M 系列），解压后把「任务管理器-统一版.app」拖进「应用程序」，**首次打开需右键 → 打开**（未做 Apple 公证，右键打开一次后即可正常双击）。
 
 各版本 ZIP 的 SHA256 见对应 Release 说明。
 
@@ -41,7 +41,7 @@
 
 ## Windows 与断线恢复
 
-Windows 使用现有 SSH 别名 `win11`，SFTP 盘符绝对路径为 `/C:/...`。动态 CPU 频率每轮读取 PercentProcessorPerformance × 标称 MHz / 100；GPU 用 nvidia-smi，温度/功耗依赖可选的 LHM 服务。传感器任务当前在用户登录后启动；未登录、驱动读数无效时如实显示缺失。
+Windows 使用现有 SSH 别名 `win11`，SFTP 盘符绝对路径为 `/C:/...`。动态 CPU 频率每轮读取 PercentProcessorPerformance × 标称 MHz / 100；GPU 用 nvidia-smi，温度/功耗接入 LHM 0.9.6 + PawnIO 2.2.0 服务（[部署说明](windows/README.md)）。传感器任务当前在用户登录后启动；未登录、驱动读数无效时如实显示缺失。
 
 断线时显示自动重试遮罩并暂停追加旧指标；SSH 可达后自动恢复，重启/断线后重新建立进程 CPU 差分基准。文件页支持右键复制、剪切、重命名、新建、回收站删除；同名目标拒绝静默覆盖。删除只送 Windows 回收站。
 

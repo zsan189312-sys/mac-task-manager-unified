@@ -330,6 +330,10 @@ function mainIface(d) {
   return list.slice().sort((a, b) => (b.rx + b.tx) - (a.rx + a.tx))[0] || null;
 }
 function pkgTemp(d) {
+  if (d.power && d.power.style === 'win') {
+    const value = d.power.cpuTemp;
+    return Number.isFinite(value) && value > 0 ? value.toFixed(1) : '—';
+  }
   const t = (d.power && d.power.temp) || {};
   return t['x86_pkg_temp'] !== undefined ? t['x86_pkg_temp'].toFixed(0)
     : Object.values(t)[0] !== undefined ? Object.values(t)[0].toFixed(0) : '—';
@@ -810,7 +814,7 @@ const detailDefs = {
   },
   power: {
     build(d) {
-      // Windows：WinRing0 内核驱动读 CPU 封装功耗（AMD SMU）+ nvidia-smi 读 GPU 功耗
+      // Windows：LHM / PawnIO 读取 CPU 温度功耗，nvidia-smi 读取 GPU 功耗
       if (d.power && d.power.style === 'win') {
         return `
         <div class="info-grid cols-3">
@@ -821,7 +825,7 @@ const detailDefs = {
           <div class="info-item"><div class="info-label">GPU 温度</div><div class="info-value" id="pw-temp">—</div></div>
           <div class="info-item"><div class="info-label">GPU 功耗上限</div><div class="info-value" id="pw-limit">—</div></div>
         </div>
-        <div class="section-title">${d.power.partial ? '部分功耗数据不可用，仅合计可读取的分项' : '整机估算 = CPU 封装 + GPU 封装'}（主板 / 硬盘 / 风扇未计入）</div>`;
+        <div class="section-title">${d.power.partial ? '部分功耗数据不可用，仅合计可读取的分项' : '整机估算 = CPU 封装 + GPU 封装'}（主板 / 硬盘 / 风扇未计入）· 曲线：橙=功耗 / 红=CPU 温度</div>`;
       }
       return `
         <div class="info-grid cols-3">

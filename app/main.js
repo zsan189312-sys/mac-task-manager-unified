@@ -849,7 +849,7 @@ function buildWinPayload() {
       powerLimit: wGpu.powerLimit > 0 ? wGpu.powerLimit : null,
       temp: wGpu.temp >= 0 ? wGpu.temp : null
     } : null,
-    // v1.2.3：功耗/温度卡片升级为「整机口径」——WinRing0 内核驱动读 CPU 封装功耗（AMD SMU），
+    // v2.2.5：LHM / PawnIO 读取 CPU 封装功耗与温度（AMD SMU），
     // GPU 功耗沿用 nvidia-smi；整机估算 = CPU 封装 + GPU 封装（主板/硬盘/风扇未计入）
     power: (() => {
       const pick = (hw, type, re) => {
@@ -858,7 +858,7 @@ function buildWinPayload() {
       };
       const cpuPower = pick('Cpu', 'Power', /^Package$/i);
       const cpuTemp = pick('Cpu', 'Temperature', /Tctl|Tdie|^Package/i);
-      // WinRing0 读数失败还会返回 0：桌面 CPU 封装不可能实际为 0 W / 0℃。
+      // 兼容旧 WinRing0：驱动失败的 0 W / 0℃ 不作为桌面 CPU 有效读数。
       const cpuP = cpuPower > 0 ? cpuPower : null;
       const cpuT = cpuTemp > 0 ? cpuTemp : null;
       const gpuS = pick('GpuNvidia', 'Power', /Package/i);

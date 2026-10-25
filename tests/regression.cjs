@@ -132,5 +132,15 @@ test('Missing power-chart temperature is a gap, never a fabricated zero',()=>{
  payload.power.temp={x86_pkg_temp:50};h.callbacks.stats(payload);assert.equal(h.run('hist.temp[1]'),50);
 });
 
+
+test('PawnIO real sensor fixture supplies CPU power, temperature and LHM clocks',()=>{
+ const h=harness();h.ctx.seed=snap();h.ctx.sensors=JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/lhm-pawnio-cpu.json'),'utf8'));
+ h.run('wSnap=seed;wSensors=sensors;wGpu={power:100,util:50};');const data=plain(h.run('buildWinPayload()'));
+ assert.equal(data.power.cpu,36.404);assert.equal(data.power.cpuTemp,62.125);assert(Math.abs(data.power.pkg-136.404)<1e-6);assert.equal(data.power.partial,false);assert(data.cpu.freqSources.every(x=>x==='lhm'));
+});
+test('Windows power chart uses real CPU temperature and preserves missing values',()=>{
+ const h=rendererHarness();h.ctx.data={power:{style:'win',cpuTemp:62.875}};assert.equal(h.run('pkgTemp(data)'),'62.9');h.ctx.data.power.cpuTemp=null;assert.equal(h.run('pkgTemp(data)'),'—');h.ctx.data.power.cpuTemp=0;assert.equal(h.run('pkgTemp(data)'),'—');
+});
+
 module.exports={harness,snap,ok,rendererHarness};
 if(require.main===module)(async()=>{let failed=0;for(const {name,fn} of tests){try{await fn();console.log('PASS '+name)}catch(e){failed++;console.log('FAIL '+name+' :: '+e.message)}}console.log(`${tests.length-failed}/${tests.length} passed`);process.exitCode=failed?1:0;})();
