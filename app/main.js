@@ -953,6 +953,16 @@ function schedule() {
   if (!samplingPaused && currentHost.kind !== 'local') timer = setInterval(() => { if (!polling) poll(); }, cfg.intervalMs);
 }
 
+// macOS 某些版本初始锁屏时 Electron 返回 idle；核验当前控制台会话，
+// 只在启动查询一次，后续依靠原生 lock/unlock 事件，无常驻状态轮询。
+function sessionIsLocked(idleState, text) {
+  if (idleState === 'locked') return true;
+  try {
+    const sessions = JSON.parse(text);
+    return Array.isArray(sessions) && sessions.some(s => s.kCGSSessionOnConsoleKey === true && s.CGSSessionScreenIsLocked === true);
+  } catch (_) { return false; }
+}
+
 // 窗口不可见/锁屏/睡眠时停采；恢复后立即取新值并给曲线插入断点。
 function setSamplingPaused(reason, paused) {
   if (paused) pauseReasons.add(reason); else pauseReasons.delete(reason);
@@ -1019,7 +1029,11 @@ app.whenReady().then(async () => {
   powerMonitor.on('lock-screen', () => setSamplingPaused('locked', true));
   powerMonitor.on('unlock-screen', () => setSamplingPaused('locked', false));
   updateNetStream();
-  if (powerMonitor.getSystemIdleState(1) === 'locked') { pauseReasons.add('locked'); samplingPaused = true; }
+  const session = process.platform === 'darwin' ? await run('/usr/sbin/ioreg -n Root -d 1 -a | /usr/bin/plutil -extract IOConsoleUsers json -o - -') : '';
+  if (sessionIsLocked(powerMonitor.getSystemIdleState(1), session)) {
+    pauseReasons.add('locked'); samplingPaused = true;
+    console.info('TMU: sampling paused (locked at startup)');
+  }
   if (!samplingPaused) localTimer = setInterval(sampleLocal, 2000);
   createWindow();
 });

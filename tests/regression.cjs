@@ -185,5 +185,14 @@ test('A Windows response spanning pause and resume cannot refill the cache',asyn
  const h=harness();let finish;const pending=new Promise(r=>finish=r);h.ssh(()=>pending);const task=h.run('pollWindows()');await Promise.resolve();h.run("sampleLocal=()=>{};poll=()=>{};setSamplingPaused('minimized',true);setSamplingPaused('minimized',false)");finish(ok(snap()));await task;assert.equal(h.run('wSnap'),null);
 });
 
+test('Startup detects a locked macOS console even when Electron reports idle',()=>{
+ const h=harness();assert.equal(h.run(`sessionIsLocked('idle','[{"kCGSSessionOnConsoleKey":true,"CGSSessionScreenIsLocked":true}]')`),true);
+ assert.equal(h.run(`sessionIsLocked('locked','')`),true);
+});
+test('An inactive locked user cannot pause the active unlocked console',()=>{
+ const h=harness();assert.equal(h.run(`sessionIsLocked('idle','[{"kCGSSessionOnConsoleKey":false,"CGSSessionScreenIsLocked":true},{"kCGSSessionOnConsoleKey":true,"CGSSessionScreenIsLocked":false}]')`),false);
+ assert.equal(h.run(`sessionIsLocked('idle','invalid')`),false);
+});
+
 module.exports={harness,snap,ok,rendererHarness};
 if(require.main===module)(async()=>{let failed=0;for(const {name,fn} of tests){try{await fn();console.log('PASS '+name)}catch(e){failed++;console.log('FAIL '+name+' :: '+e.message)}}console.log(`${tests.length-failed}/${tests.length} passed`);process.exitCode=failed?1:0;})();
