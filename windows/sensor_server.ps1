@@ -38,7 +38,7 @@ try {
   $version = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $LibraryDirectory 'LibreHardwareMonitorLib.dll')).FileVersion
   $computer = New-Object LibreHardwareMonitor.Hardware.Computer
   $computer.IsCpuEnabled = $true
-  $computer.IsGpuEnabled = $true
+  $computer.IsGpuEnabled = $false
   $computer.Open()
   $listener = New-Object Net.HttpListener
   $listener.Prefixes.Add("http://127.0.0.1:$Port/")
@@ -48,27 +48,29 @@ try {
   $lastError = $null
   $snapshot = @()
   $json = '[]'
-  $nextSample = [DateTime]::MinValue
+  $sampleCount = 0
   $pending = $listener.GetContextAsync()
   Write-Log "started LHM=$version provider=PawnIO endpoint=127.0.0.1:$Port"
   while ($listener.IsListening) {
-    if ([DateTime]::UtcNow -ge $nextSample) {
+    # 阻塞等待请求；无人查看时不唤醒、不访问驱动，也不重复序列化 JSON。
+    $pending.Wait()
+    $context = $pending.Result
+    $isRead = $context.Request.HttpMethod -eq 'GET' -and $context.Request.Url.AbsolutePath -in @('/','/health')
+    if ($isRead -and (!$sampleAt -or ([DateTime]::UtcNow - $sampleAt).TotalMilliseconds -ge $IntervalMs)) {
       try {
         $items = New-Object 'System.Collections.Generic.List[object]'
         foreach ($hardware in $computer.Hardware) { Read-Hardware $hardware $items }
         $snapshot = @($items.ToArray())
         $json = ConvertTo-Json -InputObject $snapshot -Compress -Depth 4
         $sampleAt = [DateTime]::UtcNow
+        $sampleCount++
         $lastError = $null
       } catch {
         $snapshot = @(); $json = '[]'; $sampleAt = $null
         $lastError = $_.Exception.Message
         Write-Log ('sample error: ' + $lastError)
       }
-      $nextSample = [DateTime]::UtcNow.AddMilliseconds($IntervalMs)
     }
-    if (!$pending.Wait(100)) { continue }
-    $context = $pending.Result
     try {
       $context.Response.ContentType = 'application/json; charset=utf-8'
       $context.Response.Headers['Cache-Control'] = 'no-store'
@@ -79,7 +81,7 @@ try {
         $cpuTemperature = @($snapshot | Where-Object { $_.hw -eq 'Cpu' -and $_.type -eq 'Temperature' -and $_.val -gt 0 }).Count -gt 0
         $cpuPower = @($snapshot | Where-Object { $_.hw -eq 'Cpu' -and $_.type -eq 'Power' -and $_.name -eq 'Package' -and $_.val -gt 0 }).Count -gt 0
         $body = ConvertTo-Json -Compress -Depth 3 -InputObject ([pscustomobject]@{
-          version='2.2.5'; libraryVersion=$version; provider='PawnIO'; pid=$PID
+          version='2.2.6'; samplingMode='on-demand'; sampleCount=$sampleCount; libraryVersion=$version; provider='PawnIO'; pid=$PID
           startedAt=$startedAt.ToString('o')
           sampleAt=$(if($sampleAt){$sampleAt.ToString('o')}else{$null})
           sampleAgeMs=$(if($sampleAt){[int]([DateTime]::UtcNow-$sampleAt).TotalMilliseconds}else{$null})
@@ -103,7 +105,7 @@ try {
     }
   }
 } catch {
-  Write-Log ('fatal: ' + $_.Exception.ToString())
+  Write-Log ('fatal: ' + $_.Exception.ToString() + ' at ' + $_.ScriptStackTrace)
   exit 1
 } finally {
   if ($listener) { $listener.Close() }

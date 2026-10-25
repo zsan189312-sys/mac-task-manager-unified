@@ -4,9 +4,9 @@
 
 ## 下载（免编译）
 
-👉 [Releases 页 → v2.2.5](https://github.com/zsan189312-sys/mac-task-manager-unified/releases/tag/v2.2.5)
+👉 [Releases 页 → v2.2.6](https://github.com/zsan189312-sys/mac-task-manager-unified/releases/tag/v2.2.6)
 
-下载 `TaskManager-Unified-v2.2.5-macOS-arm64.zip`（约 100 MiB，Apple Silicon / M 系列），解压后把「任务管理器-统一版.app」拖进「应用程序」，**首次打开需右键 → 打开**（未做 Apple 公证，右键打开一次后即可正常双击）。
+下载 `TaskManager-Unified-v2.2.6-macOS-arm64.zip`（约 100 MiB，Apple Silicon / M 系列），解压后把「任务管理器-统一版.app」拖进「应用程序」，**首次打开需右键 → 打开**（未做 Apple 公证，右键打开一次后即可正常双击）。
 
 各版本 ZIP 的 SHA256 见对应 Release 说明。
 
@@ -37,7 +37,9 @@
 
 ![容器页](docs/screenshots/docker.png)
 
-**省流量设计**：快照 gzip 后约 1.8 KB/次；进程表与容器数据仅在对应页打开时采集；状态栏实时显示延迟与本次会话流量。5 秒轮询挂机 24 小时约 30 MB。
+**低占用设计**：窗口最小化、隐藏、锁屏或睡眠时停采；恢复后立即刷新，暂停期间的曲线留断点。正常显示时 Mac 继续每 2 秒采样，远程按所选间隔轮询；单轮未完成时不叠加追赶任务。进程表、容器和 Mac 逐进程网络仅在相应页面采集。图表使用软件绘制，减少图形缓存；并非持续动画。
+
+v2.2.6 实测：Mac 6 轮非进程页采集命令 59→47；Win11 每轮有效载荷约 33 KB→4.2 KB（不含 SSH 协议开销）。Win11 传感器收到请求才访问 CPU 驱动，无请求时阻塞等待；GPU 仅由 nvidia-smi 读取。数值为当次环境测试，实际资源随页面、进程数量和系统负载变化。
 
 ## Windows 与断线恢复
 

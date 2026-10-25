@@ -1,5 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('bridge', {
+  onSamplingGap: (cb) => ipcRenderer.on('sampling-gap', () => cb()),
   onStats: (cb) => ipcRenderer.on('stats', (e, data) => cb(data)),
   // 本机后台常驻采样帧（看远程主机时喂本机曲线缓存，纯本地零流量）
   onLocalHist: (cb) => ipcRenderer.on('local-hist', (e, data) => cb(data)),

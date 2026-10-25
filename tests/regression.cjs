@@ -18,7 +18,7 @@ function harness({live = false} = {}) {
   const cp = {spawn:(...args)=>{calls.push(['spawn',...args]);return live ? require('node:child_process').spawn(...args) : child();},exec:(...args)=>{calls.push(['exec',...args]);const cb=args.at(-1);if(typeof cb==='function')queueMicrotask(()=>cb(null,''));return child();},execFile:(...args)=>{calls.push(['execFile',...args]);const cb=args.at(-1);if(typeof cb==='function')queueMicrotask(()=>cb(null,''));return child();}};
   const dialog = {showMessageBox:async()=>({response:1}),showOpenDialog:async()=>({canceled:true}),showSaveDialog:async()=>({canceled:true})};
   const cfg = {hosts:[{id:'local',kind:'local',name:'MacBook'},{id:'n100',kind:'remote',name:'N100',host:'n100',port:9100},{id:'win11',kind:'win',name:'Win11',host:'win11'}],activeHost:'win11',intervalMs:2000};
-  const electron={app:{setName(){},getPath:()=>'/isolated-test',requestSingleInstanceLock:()=>true,whenReady:()=>({then(){}}),on(){},quit(){}},BrowserWindow:{getAllWindows:()=>[]},ipcMain:{handle:(k,v)=>handlers.set(k,v),on:(k,v)=>listeners.set(k,v)},dialog,nativeTheme:{}};
+  const electron={app:{disableHardwareAcceleration(){},setName(){},getPath:()=>'/isolated-test',requestSingleInstanceLock:()=>true,whenReady:()=>({then(){}}),on(){},quit(){}},BrowserWindow:{getAllWindows:()=>[]},ipcMain:{handle:(k,v)=>handlers.set(k,v),on:(k,v)=>listeners.set(k,v)},dialog,nativeTheme:{}};
   const ctx=vm.createContext({__dirname:path.join(__dirname,"../app"),console,Buffer,process,require:n=>n==='electron'?electron:n==='child_process'?cp:n==='fs'?{...fs,readFileSync:(p,...a)=>p==='/isolated-test/config.json'?JSON.stringify(cfg):fs.readFileSync(p,...a),writeFileSync:(p,...a)=>{if(p!=='/isolated-test/config.json')fs.writeFileSync(p,...a)},existsSync:p=>live?fs.existsSync(p):false}:require(n),setTimeout:(fn,ms)=>{if(live)return setTimeout(fn,ms);timers.push({fn,ms});if(ms<1000)queueMicrotask(fn);return fn;},clearTimeout:id=>{if(live)clearTimeout(id)},setInterval:fn=>live?setInterval(fn,400):fn,clearInterval:id=>{if(live)clearInterval(id)},queueMicrotask});
   vm.runInContext(code+`\nwin={isDestroyed:()=>false,webContents:{send:(...a)=>globalThis.frames.push(a)}};`,ctx);
   ctx.frames=[];
@@ -78,7 +78,7 @@ function rendererHarness() {
  const elements=new Map(),callbacks={};
  const context=new Proxy({},{get:()=>()=>{}});
  const element=id=>{if(!elements.has(id))elements.set(id,{style:{},dataset:{},classList:{toggle(){},add(){},remove(){}},innerHTML:'',textContent:'',children:[],appendChild(){},querySelectorAll:()=>[],addEventListener(){},getContext:()=>context,getBoundingClientRect:()=>({width:500,height:200}),focus(){},select(){}});return elements.get(id)};
- const window={devicePixelRatio:1,events:{},addEventListener:(k,v)=>{window.events[k]=v},bridge:{onStats:fn=>callbacks.stats=fn,onLocalHist(){},onDlProgress(){},getHosts:async()=>({hosts:[],active:'win11',intervalMs:2000}),setView(){}}};
+ const window={devicePixelRatio:1,events:{},addEventListener:(k,v)=>{window.events[k]=v},bridge:{onStats:fn=>callbacks.stats=fn,onLocalHist(){},onSamplingGap:fn=>callbacks.gap=fn,onDlProgress(){},getHosts:async()=>({hosts:[],active:'win11',intervalMs:2000}),setView(){}}};
  const document={getElementById:element,querySelectorAll:()=>[],createElement:()=>element('created'+Math.random()),body:element('body')};
  const ctx=vm.createContext({window,document,console,setTimeout,clearTimeout,innerWidth:1000,innerHeight:800,navigator:{clipboard:{writeText(){}}}});
  const source=renderer.replace(/renderHostSeg\(\);\s*buildSidebar\(\);\s*switchView\('perf'\);\s*$/,'');
@@ -106,7 +106,7 @@ test('Unavailable zero CPU power and temperature are not shown as real readings'
  const h=harness();h.ctx.seed=snap();h.run("wSnap=seed;wGpu={power:100};wSensors=[{hw:'Cpu',type:'Power',name:'Package',val:0},{hw:'Cpu',type:'Temperature',name:'Core (Tctl/Tdie)',val:0}];");const power=plain(h.run('buildWinPayload().power'));assert.equal(power.cpu,null);assert.equal(power.cpuTemp,null);assert.equal(power.pkg,100);assert.equal(power.partial,true);
 });
 test('Nettop uses streaming spawn rather than exec output accumulation',()=>{
- const h=harness();h.run('startNetStream()');assert.equal(h.calls[0][0],'spawn');assert.equal(h.calls[0][1],'nettop');assert.equal(h.calls.some(x=>x[0]==='exec'),false);assert.equal(h.calls[0][3].stdio[0],'pipe');assert(h.calls[0][2].includes('-c'));assert(h.calls[0][2].includes('-s'));
+ const h=harness();h.run('currentHost=cfg.hosts[0];wantProcs=true;startNetStream()');assert.equal(h.calls[0][0],'spawn');assert.equal(h.calls[0][1],'nettop');assert.equal(h.calls.some(x=>x[0]==='exec'),false);assert.equal(h.calls[0][3].stdio[0],'pipe');assert(h.calls[0][2].includes('-c'));assert(h.calls[0][2].includes('-s'));
 });
 test('Real HTTP 500 and aborted bodies do not count as successful telemetry',async()=>{
  const http=require('http');let mode='error';const server=http.createServer((req,res)=>{if(mode==='error'){res.writeHead(500);res.end('{"sys":{},"cores":[1],"mem":{}}')}else{res.writeHead(200,{'Content-Length':'1000'});res.write('{');setImmediate(()=>res.destroy());}});
@@ -140,6 +140,49 @@ test('PawnIO real sensor fixture supplies CPU power, temperature and LHM clocks'
 });
 test('Windows power chart uses real CPU temperature and preserves missing values',()=>{
  const h=rendererHarness();h.ctx.data={power:{style:'win',cpuTemp:62.875}};assert.equal(h.run('pkgTemp(data)'),'62.9');h.ctx.data.power.cpuTemp=null;assert.equal(h.run('pkgTemp(data)'),'—');h.ctx.data.power.cpuTemp=0;assert.equal(h.run('pkgTemp(data)'),'—');
+});
+
+
+test('Nettop is absent outside local process view and stops without retry',()=>{
+ const h=harness();h.run('startNetStream()');assert.equal(h.calls.length,0);
+ h.run('currentHost=cfg.hosts[0];wantProcs=true;updateNetStream()');assert.equal(h.calls.length,1);
+ const child=h.run('netStream');let killed=false;child.kill=()=>{killed=true;child.emit('close',0)};
+ h.run('wantProcs=false;updateNetStream()');assert(killed);assert.equal(h.run('netStream'),null);assert.equal(h.timers.length,0);
+});
+test('Local process enumeration is skipped outside process page',async()=>{
+ const h=harness();h.run('currentHost=cfg.hosts[0];globalThis.processReads=0;localProcs=async()=>{processReads++;return {count:1,list:[]}}');
+ await h.run('pollLocal()');await h.run('pollLocal()');await h.run('pollLocal()');assert.equal(h.ctx.processReads,0);
+ h.run('wantProcs=true;lRefreshUI=true;');await h.run('pollLocal()');assert.equal(h.ctx.processReads,1);
+});
+test('Windows process flag gates expensive queries but retains live count',async()=>{
+ const h=harness();let flags=[];h.ssh(async(_,s)=>{if(s.includes('Win32_OperatingSystem')){flags.push(s.includes('if(1){$pr'));return ok({...snap(),processCount:350,procs:[]})}return {ok:false,out:''}});
+ await h.run('pollWindows()');assert.equal(h.run('buildWinPayload().procs.count'),350);assert.equal(h.run('buildWinPayload().procs.list.length'),0);
+ h.run('wantProcs=true;');await h.run('pollWindows()');assert.deepEqual(flags,[false,true]);
+ for(const v of ['0','1']){const enc=Buffer.from(h.run('WIN_PS').replace('__PROCS__',v),'utf16le').toString('base64');assert(enc.length<8191);assert(('powershell -NoProfile -NonInteractive -EncodedCommand '+enc).length<8191);}
+});
+test('Sensor HTTP uses direct SSH curl without starting PowerShell',async()=>{
+ const h=harness();const args=[];h.ssh(async(...a)=>{args.push(a);return a[1].includes('Win32_OperatingSystem')?ok(snap()):{ok:false,out:''}});await h.run('pollWindows()');assert.equal(args.find(a=>a[1].includes('curl.exe'))[4],true);
+});
+test('Pause reasons overlap and resume only after the last reason clears',async()=>{
+ const h=harness();h.run('globalThis.localCalls=0;globalThis.remoteCalls=0;sampleLocal=()=>localCalls++;poll=()=>remoteCalls++;');
+ h.run("setSamplingPaused('minimized',true);setSamplingPaused('locked',true);setSamplingPaused('minimized',false)");assert(h.run('samplingPaused'));assert.equal(h.ctx.localCalls,0);
+ h.run("setSamplingPaused('locked',false)");assert.equal(h.run('samplingPaused'),false);assert.equal(h.ctx.localCalls,1);assert.equal(h.ctx.remoteCalls,1);assert.equal(h.ctx.frames[0][0],'sampling-gap');
+});
+test('Paused collectors do not start any new work',async()=>{
+ const h=harness();h.run("setSamplingPaused('hidden',true)");await h.run('sampleLocal()');await h.run('poll()');assert.equal(h.calls.length,0);assert.equal(h.ctx.frames.length,0);
+});
+test('A remote sample finishing after minimize is never rendered',async()=>{
+ const h=harness();let finish;h.ctx.pending=new Promise(r=>finish=r);h.run('pollWindows=()=>pending');const task=h.run('poll()');h.run("setSamplingPaused('minimized',true)");finish();await task;assert.equal(h.ctx.frames.length,0);
+});
+test('A local sample finishing after minimize is never rendered',async()=>{
+ const h=harness();let finish;h.ctx.pending=new Promise(r=>finish=r);h.run('pollLocal=()=>pending');const task=h.run('sampleLocal()');h.run("setSamplingPaused('minimized',true)");finish();await task;assert.equal(h.ctx.frames.length,0);
+});
+test('Resume puts a gap into history instead of replaying old values',()=>{
+ const h=rendererHarness();h.run('push(hist.cpu,30);histCache.local=newHist();push(histCache.local.cpu,40)');h.callbacks.gap();assert.equal(h.run('hist.cpu.at(-1)'),null);assert.equal(h.run('histCache.local.cpu.at(-1)'),null);
+});
+
+test('A Windows response spanning pause and resume cannot refill the cache',async()=>{
+ const h=harness();let finish;const pending=new Promise(r=>finish=r);h.ssh(()=>pending);const task=h.run('pollWindows()');await Promise.resolve();h.run("sampleLocal=()=>{};poll=()=>{};setSamplingPaused('minimized',true);setSamplingPaused('minimized',false)");finish(ok(snap()));await task;assert.equal(h.run('wSnap'),null);
 });
 
 module.exports={harness,snap,ok,rendererHarness};

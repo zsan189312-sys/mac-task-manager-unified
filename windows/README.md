@@ -1,6 +1,6 @@
 # Windows 传感器链路
 
-任务管理器通过 SSH 读取 Windows 自身 `http://127.0.0.1:8086/` 的 JSON 数组。服务只启用 LHM 的 CPU/GPU 采集，1 秒更新一次缓存；`/health` 提供库版本、采样时间、有效 CPU 温度/功耗与错误状态。
+任务管理器通过 SSH 读取 Windows 自身 `http://127.0.0.1:8086/` 的 JSON 数组。服务只启用 LHM 的 CPU 采集，GPU 由客户端 nvidia-smi 独立读取。收到 GET / 或 /health 时更新，1 秒内重复请求复用缓存，无请求时阻塞等待、不采样；`/health` 提供库版本、采样时间、有效 CPU 温度/功耗与错误状态。
 
 2026-10-25 已迁移：LibreHardwareMonitor 0.9.6（.NET Framework 包）+ 官方签名 PawnIO 2.2.0。Windows PowerShell 5.1 使用标准 `LibreHardwareMonitor.zip`，不是 .NET 10 包。原任务仍是登录触发，最高权限；未验证未登录启动或实际系统重启。
 

@@ -997,7 +997,7 @@ function fmtTraffic(b) {
   return b + ' B';
 }
 function defaultRightText(d) {
-  return `${d.procs.count ? '进程 ' + d.procs.count : '进程表加载中'} · 已运行 ${fmtUptime(d.sys.uptime || 0)}`;
+  return `${d.procs.count ? '进程 ' + d.procs.count + ' · ' : ''}已运行 ${fmtUptime(d.sys.uptime || 0)}`;
 }
 
 // ---------- 视图 ----------
@@ -1410,6 +1410,11 @@ window.bridge.onLocalHist((d) => {
   });
 });
 
+window.bridge.onSamplingGap(() => {
+  // 暂停期间没有样本，恢复时明确断开所有主机曲线。
+  for (const h of new Set([hist, ...Object.values(histCache)])) markGap(h);
+});
+
 let connectionLost = false;
 window.bridge.onStats((d) => {
   const hid = d.host && d.host.id;
@@ -1479,7 +1484,7 @@ window.bridge.onStats((d) => {
   const dot = document.getElementById('sb-dot');
   dot.className = 'sb-dot' + (d.link.ok ? '' : ' bad');
   if (d.host.kind === 'local') {
-    setText('sb-left', `本机直采 · ${d.host.name} · 每 2 秒刷新 · ${d.procs.count || ''}${d.procs.count ? ' 个进程' : ''}`);
+    setText('sb-left', `本机直采 · ${d.host.name} · 每 2 秒刷新${d.procs.count ? ' · ' + d.procs.count + ' 个进程' : ''}`);
   } else if (d.host.kind === 'win') {
     setText('sb-left', d.link.ok
       ? `已连接 ${d.host.name}（SSH · ${d.link.host}） · 采样 ${d.link.rtt} ms · 轮询 ${(d.link.interval / 1000).toFixed(0)} 秒 · 本次会话已用流量 ${fmtTraffic(d.link.bytes)}`
