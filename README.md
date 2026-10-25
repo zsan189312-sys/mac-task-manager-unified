@@ -4,9 +4,9 @@
 
 ## 下载（免编译）
 
-👉 [Releases 页 → v2.2.3](https://github.com/zsan189312-sys/mac-task-manager-unified/releases/tag/v2.2.3)
+👉 [Releases 页 → v2.2.4](https://github.com/zsan189312-sys/mac-task-manager-unified/releases/tag/v2.2.4)
 
-下载 `TaskManager-Unified-v2.2.3-macOS-arm64.zip`（约 100 MiB，Apple Silicon / M 系列），解压后把「任务管理器-统一版.app」拖进「应用程序」，**首次打开需右键 → 打开**（未做 Apple 公证，右键打开一次后即可正常双击）。
+下载 `TaskManager-Unified-v2.2.4-macOS-arm64.zip`（约 100 MiB，Apple Silicon / M 系列），解压后把「任务管理器-统一版.app」拖进「应用程序」，**首次打开需右键 → 打开**（未做 Apple 公证，右键打开一次后即可正常双击）。
 
 各版本 ZIP 的 SHA256 见对应 Release 说明。
 

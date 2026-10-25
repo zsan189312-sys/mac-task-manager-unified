@@ -124,5 +124,13 @@ test('Escape closes the file context menu',()=>{
 
 test('Windows CPU model uses the processor name, not the motherboard',()=>{const h=harness();h.ctx.seed=snap();h.run("wSnap=seed;wSnap.sys.cpuModel='AMD Ryzen 5 3600';wSnap.sys.model='ASUS System Product Name';");assert.equal(h.run('buildWinPayload().cpu.model'),'AMD Ryzen 5 3600');});
 
+
+test('Missing power-chart temperature is a gap, never a fabricated zero',()=>{
+ const h=rendererHarness();h.run("currentHostId='win11';histHostId='win11';buildSidebarFor=()=>{};updateSidebar=()=>{};tickDetail=()=>{};");
+ const payload={host:{id:'win11',kind:'win',name:'Win11'},link:{ok:true,interval:2000,rtt:1,bytes:0},cpu:{total:10,cores:[],model:'Ryzen'},mem:{percent:50},disk:{totalR:0,totalW:0},net:{ifaces:[]},power:{pkg:120,ok:true},sys:{uptime:10},procs:{count:0,list:[]}};
+ h.callbacks.stats(payload);assert.equal(h.run('hist.temp[0]'),null);
+ payload.power.temp={x86_pkg_temp:50};h.callbacks.stats(payload);assert.equal(h.run('hist.temp[1]'),50);
+});
+
 module.exports={harness,snap,ok,rendererHarness};
 if(require.main===module)(async()=>{let failed=0;for(const {name,fn} of tests){try{await fn();console.log('PASS '+name)}catch(e){failed++;console.log('FAIL '+name+' :: '+e.message)}}console.log(`${tests.length-failed}/${tests.length} passed`);process.exitCode=failed?1:0;})();

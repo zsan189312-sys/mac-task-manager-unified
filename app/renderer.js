@@ -1450,7 +1450,7 @@ window.bridge.onStats((d) => {
   const m = mainIface(d);
   push(hist.netrx, m ? m.rx : 0);
   push(hist.nettx, m ? m.tx : 0);
-  if (d.power) { push(hist.power, d.power.pkg); const tp = parseFloat(pkgTemp(d)); push(hist.temp, isNaN(tp) ? 0 : tp); }
+  if (d.power) { push(hist.power, d.power.pkg); const tp = parseFloat(pkgTemp(d)); push(hist.temp, isNaN(tp) ? null : tp); }
   // GPU 首帧采样未就绪（util=null）时沿用上一值，避免曲线上出现假 0 尖谷
   if (d.gpu) push(hist.gpu, typeof d.gpu.util === 'number' ? d.gpu.util : (hist.gpu.length ? hist.gpu[hist.gpu.length - 1] : 0));
   if (d.batt) push(hist.batt, typeof d.batt.watts === 'number' ? d.batt.watts : null);
