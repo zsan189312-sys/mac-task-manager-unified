@@ -1,1 +1,1 @@
-{"name":"task-manager-mobile","version":"1.0.0","private":true,"description":"Android 16 native client and read-only Tailscale monitoring gateway","scripts":{"test":"node --test tests/*.test.cjs","gateway":"node server/gateway.cjs","mac":"node mac/probe.cjs"},"engines":{"node":">=18"}}
+{"name":"task-manager-mobile","version":"1.0.2","private":true,"description":"Android 16 native client and read-only Tailscale monitoring gateway","scripts":{"test":"node --test tests/*.test.cjs","gateway":"node server/gateway.cjs","mac":"node mac/probe.cjs"},"engines":{"node":">=18"}}

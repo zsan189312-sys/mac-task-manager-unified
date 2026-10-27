@@ -10,7 +10,8 @@ cfg=json.loads(cfgfile.read_text());action=sys.argv[1] if len(sys.argv)>1 else '
 def online():
     try:
         req=urllib.request.Request(f'http://{cfg["bind"]}:{cfg["port"]}/v1/health',headers={'Authorization':'Bearer '+cfg['token']})
-        with urllib.request.urlopen(req,timeout=2) as r:return json.load(r).get('readOnly') is True
+        opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req,timeout=2) as r:return json.load(r).get('readOnly') is True
     except Exception:return False
 if action=='status':print('采集端在线' if online() else '采集端未运行');raise SystemExit(0)
 if action=='stop':

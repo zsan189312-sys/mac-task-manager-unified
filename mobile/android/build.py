@@ -2,7 +2,11 @@
 """Build a small native APK using the installed official SDK; no Gradle daemon/dependencies."""
 from pathlib import Path
 import os,subprocess,shutil,zipfile,json,hashlib,secrets
+import xml.etree.ElementTree as ET
 root=Path(__file__).resolve().parent
+manifest=ET.parse(root/'AndroidManifest.xml').getroot()
+version=manifest.attrib['{http://schemas.android.com/apk/res/android}versionName']
+version_code=int(manifest.attrib['{http://schemas.android.com/apk/res/android}versionCode'])
 sdk=Path(os.environ.get('ANDROID_HOME',str(Path.home()/'Library/Android/sdk')))
 jdk=Path(os.environ.get('JAVA_HOME','/opt/homebrew/opt/openjdk@17'))
 tools=sdk/'build-tools/36.0.0';jar=sdk/'platforms/android-36/android.jar';build=root/'build'
@@ -27,8 +31,8 @@ if not keystore.exists():
     password.write_text(secrets.token_urlsafe(32));password.chmod(0o600)
     run([jdk/'bin/keytool','-genkeypair','-keystore',keystore,'-storepass:file',password,'-keypass:file',password,'-alias','tmu-mobile','-keyalg','RSA','-keysize','3072','-validity','10000','-dname','CN=TMU Mobile Release,OU=Personal Applications,O=TMU,C=CN'])
     keystore.chmod(0o600)
-apk=build/'TaskManager-Mobile-v1.0.0.apk'
+apk=build/('TaskManager-Mobile-v'+version+'.apk')
 run([tools/'apksigner','sign','--ks',keystore,'--ks-key-alias','tmu-mobile','--ks-pass','file:'+str(password),'--out',apk,build/'aligned.apk'])
 run([tools/'apksigner','verify','--verbose','--print-certs',apk]);run([tools/'zipalign','-c','-p','4',apk])
-meta={'version':'1.0.0','targetSdk':36,'minSdk':28,'bytes':apk.stat().st_size,'sha256':hashlib.sha256(apk.read_bytes()).hexdigest()}
+meta={'version':version,'versionCode':version_code,'targetSdk':36,'minSdk':28,'bytes':apk.stat().st_size,'sha256':hashlib.sha256(apk.read_bytes()).hexdigest()}
 (build/'artifact.json').write_text(json.dumps(meta,indent=2));print(json.dumps(meta,indent=2))

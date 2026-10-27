@@ -1,0 +1,5 @@
+<resources>
+    <item name="card_mac" type="id"/>
+    <item name="card_n100" type="id"/>
+    <item name="card_win11" type="id"/>
+</resources>

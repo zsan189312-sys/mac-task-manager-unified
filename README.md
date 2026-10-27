@@ -12,7 +12,7 @@
 
 ## Android 手机端
 
-独立原生 Android 16 客户端 **三端任务管理器 1.0.0**：三台总览、详细指标与只读进程列表。[源码与部署说明](mobile/README.md) · [APK 预览版下载](https://github.com/zsan189312-sys/mac-task-manager-unified/releases/tag/android-v1.0.0)。Mac/N100 后端已实采；按用户安排，Android 真机与 Windows 导出器部署/联调暂缓，详见交付边界。
+独立原生 Android 16 客户端 **三端任务管理器 1.0.2**：三台卡片总览、真实采样动效、详细指标与只读进程列表。[源码与部署说明](mobile/README.md) · [APK 预览版下载](https://github.com/zsan189312-sys/mac-task-manager-unified/releases/tag/android-v1.0.2)。已在 Android 16 真机通过 Tailscale 验证 Mac/N100；Win11 因设备无法开机仍待导出器部署与联调，详见交付边界。
 
 ## 预览
 
