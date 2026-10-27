@@ -1,4 +1,4 @@
-# 三端任务管理器 · Android 1.0.2
+# 三端任务管理器 · Android 1.0.3
 
 原生 Java Android App，target/compile SDK 36（Android 16），最低 Android 9。第一版只读监控和进程列表，无文件管理、结束进程或后台常驻服务。
 
@@ -6,6 +6,14 @@
 - 进程列表按整机 CPU 占比排序，支持名称和 PID 搜索、三主机切换；最多返回前 100 个进程并显示真实总数。
 - 5/10/30 秒刷新，离开前台停止请求和绘制；仅新采样到达时播放 650ms、约 30fps 的圆环、内存条与曲线末段动画，不使用 WebView。离线/缺失读数显示缺失，不加入模拟数据。
 - 连接口令通过 Android Keystore AES-GCM 加密保存，关闭系统备份；APK 中不包含设备私钥或连接口令。HTTP 只允许 Tailscale 地址/回环地址，手机访问 Tailscale HTTP 端点时检查 VPN；HTTPS 使用系统证书校验。
+
+## 1.0.3 修复（2026-10-27）
+
+- MacBook M4 温度此前为探针未接入，本版增加普通用户只读 AppleSMC 助手。显示 CPU/GPU“热点”（各组有效传感器最高值），不是逐逻辑核温度；传感器数量不等于核心数。仅启用已在本机验证的 Apple M4 映射，10–150℃ 有效范围过滤休眠时 0.1℃ 等无效读数，不可读保留缺失。详情见 [SMC 口径与来源](mac/SMC-NOTES.md)。
+- 修复 CPU 8/9 最后一行按两列拉伸的问题，所有行固定四列；注明逻辑处理器数量。CPU 历史加 0/50/100 刻度、最近 60 个采样说明和空样本提示，减少低负载时的空白感。
+- 详情刷新保持滚动位置；进程列表改为使用实际可用高度，去掉 600dp 嵌套滚动，末尾进程可正常到达；详情的电池功率明确区分充/放电。
+- Mac 间隔超过 30 秒后，先重新建立 CPU/磁盘/网络差分基准，避免将长时间暂停的平均速率当作恢复后的实时速率。断网立即插入历史断点。
+- 温度助手只在启动时按源码哈希编译，需要 macOS Command Line Tools（本机已具备），不需要管理员权限、传感器驱动或常驻助手。产物位于私有 Application Support/TMU-Mobile/bin，不提交二进制到仓库。
 
 ## 架构与使用条件
 
@@ -42,7 +50,7 @@ python3 mobile/android/build.py
 node --test mobile/tests/*.test.cjs
 ```
 
-构建使用官方 aapt2 → javac → D8 → zipalign → apksigner，无 Gradle 常驻进程。APK 在 `mobile/android/build/TaskManager-Mobile-v1.0.2.apk`。签名私钥与口令只保存在本机 `Library/Application Support/TMU-Mobile/signing/`，不要提交或上传，后续升级必须沿用。
+构建使用官方 aapt2 → javac → D8 → zipalign → apksigner，无 Gradle 常驻进程。APK 在 `mobile/android/build/TaskManager-Mobile-v1.0.3.apk`。签名私钥与口令只保存在本机 `Library/Application Support/TMU-Mobile/signing/`，不要提交或上传，后续升级必须沿用。
 
 `tests/EndpointTest.java` 可与 `android/src/com/tmu/mobile/Endpoint.java` 在普通 JDK 编译运行，检查端点规则；这不是 Android 运行测试。
 
@@ -88,4 +96,4 @@ HTTP API 都要求 `Authorization: Bearer <private-token>`：`GET /v1/health`、
 
 ## 源码版本
 
-本目录独立版本 1.0.2，Git tag `android-v1.0.2`。桌面版继续 v2.2.7，其部署、签名和启动铁律不变。Mac 采集函数来自桌面 v2.2.7 的已验逻辑（`mac/desktop-collectors.cjs`），不包含 Electron 生命周期、计时轮询或 nettop；Windows 固定采集脚本同样来自该版，走文件执行以避免 Windows 编码命令长度限制。
+本目录独立版本 1.0.3，Git tag `android-v1.0.3`。桌面版继续 v2.2.7，其部署、签名和启动铁律不变。Mac 采集函数来自桌面 v2.2.7 的已验逻辑（`mac/desktop-collectors.cjs`），不包含 Electron 生命周期、计时轮询或 nettop；Windows 固定采集脚本同样来自该版，走文件执行以避免 Windows 编码命令长度限制。

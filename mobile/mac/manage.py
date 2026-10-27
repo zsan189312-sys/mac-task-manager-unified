@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Explicit on-demand launcher; never registers a login item or LaunchAgent."""
 from pathlib import Path
-import sys,os,json,subprocess,shutil,signal,urllib.request
+import sys,os,json,subprocess,shutil,signal,urllib.request,hashlib,tempfile
 root=Path(__file__).resolve().parent
 private=Path.home()/'Library/Application Support/TMU-Mobile'
 cfgfile=private/'mac.json';pidfile=private/'mac-probe.pid';logfile=private/'mac-probe.log'
@@ -23,6 +23,17 @@ if action=='stop':
         pidfile.unlink(missing_ok=True)
     else:print('没有本机采集端进程记录')
     raise SystemExit(0)
+# Build a tiny read-only helper once per source change, never once per sample.
+source=root/'smc-temps.c';bindir=private/'bin';bindir.mkdir(exist_ok=True);bindir.chmod(0o700)
+binary=bindir/'smc-temps';stamp=bindir/'smc-temps.sha256';digest=hashlib.sha256(source.read_bytes()).hexdigest()
+if not binary.exists() or not stamp.exists() or stamp.read_text().strip()!=digest:
+    fd,temporary=tempfile.mkstemp(prefix='smc-temps-',dir=bindir);os.close(fd)
+    try:
+        subprocess.run(['/usr/bin/clang','-O2','-Wall','-Wextra',str(source),'-framework','IOKit','-framework','CoreFoundation','-o',temporary],check=True,capture_output=True,timeout=30)
+        os.chmod(temporary,0o755);os.replace(temporary,binary);stamp.write_text(digest+'\n');stamp.chmod(0o600)
+        print('只读温度助手已准备；无需管理员权限或常驻传感器进程。')
+    except (subprocess.SubprocessError,OSError):print('温度助手构建不可用；其他监控继续，温度显示缺失。')
+    finally:Path(temporary).unlink(missing_ok=True)
 if online():print('本机采集端已运行，复用现有实例。');raise SystemExit(0)
 node=shutil.which('node') or '/opt/homebrew/bin/node'
 with logfile.open('ab') as log:

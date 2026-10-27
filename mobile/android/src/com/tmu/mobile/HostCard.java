@@ -52,7 +52,7 @@ final class HostCard extends View {
         time=sourceTime>0?"采样 "+new SimpleDateFormat("HH:mm:ss",Locale.CHINA).format(new Date(sourceTime)):"";
         cpuText=format(cpu,"%",0);memoryText=format(memory,"%",0);
         double temperature=number(p,"temperature");
-        temperatureLabel=Double.isFinite(temperature)?"CPU 温度":Double.isFinite(number(g,"temperature"))?"GPU 温度":"温度";
+        temperatureLabel=Double.isFinite(temperature)?p.optString("temperatureLabel","CPU 温度"):Double.isFinite(number(g,"temperature"))?g.optString("temperatureLabel","GPU 温度"):"温度";
         if(!Double.isFinite(temperature))temperature=number(g,"temperature");
         temperatureText=format(temperature,"℃",1);
         memoryBytes=size(number(m,"used"))+" / "+size(number(m,"total"));
